@@ -12,18 +12,6 @@
 
 RCT_EXPORT_MODULE();
 
-// Map curve names to SecKey attributes
-- (NSString *)curveNameForCurve:(NSString *)curve {
-    if ([curve isEqualToString:@"P-256"]) {
-        return (__bridge NSString *)kSecAttrKeySizeInBits256;
-    } else if ([curve isEqualToString:@"P-384"]) {
-        return (__bridge NSString *)kSecAttrKeySizeInBits384;
-    } else if ([curve isEqualToString:@"P-521"]) {
-        return (__bridge NSString *)kSecAttrKeySizeInBits521;
-    }
-    return (__bridge NSString *)kSecAttrKeySizeInBits384; // Default
-}
-
 - (int)keySizeForCurve:(NSString *)curve {
     if ([curve isEqualToString:@"P-256"]) {
         return 256;
