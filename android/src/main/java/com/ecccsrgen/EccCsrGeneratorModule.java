@@ -32,7 +32,6 @@ import org.bouncycastle.asn1.x509.KeyPurposeId;
 import org.bouncycastle.asn1.x509.ExtendedKeyUsage;
 import org.bouncycastle.asn1.x509.SubjectPublicKeyInfo;
 import org.bouncycastle.operator.ContentSigner;
-import org.bouncycastle.operator.jcajce.JcaContentSignerBuilder;
 import org.bouncycastle.pkcs.PKCS10CertificationRequest;
 import org.bouncycastle.pkcs.PKCS10CertificationRequestBuilder;
 
@@ -171,9 +170,33 @@ public class EccCsrGeneratorModule extends ReactContextBaseJavaModule {
             );
 
             // Sign the CSR with ECDSA-SHA256
-            ContentSigner signer = new JcaContentSignerBuilder("SHA256withECDSA")
-                    .setProvider("AndroidKeyStore")
-                    .build(keyPair.getPrivate());
+            // Create custom ContentSigner for Android KeyStore keys
+            ContentSigner signer = new ContentSigner() {
+                private ByteArrayOutputStream outputStream = new ByteArrayOutputStream();
+
+                @Override
+                public AlgorithmIdentifier getAlgorithmIdentifier() {
+                    // ecdsa-with-SHA256 OID: 1.2.840.10045.4.3.2
+                    return new AlgorithmIdentifier(new ASN1ObjectIdentifier("1.2.840.10045.4.3.2"));
+                }
+
+                @Override
+                public java.io.OutputStream getOutputStream() {
+                    return outputStream;
+                }
+
+                @Override
+                public byte[] getSignature() {
+                    try {
+                        java.security.Signature signature = java.security.Signature.getInstance("SHA256withECDSA");
+                        signature.initSign(keyPair.getPrivate());
+                        signature.update(outputStream.toByteArray());
+                        return signature.sign();
+                    } catch (Exception e) {
+                        throw new RuntimeException("Failed to sign", e);
+                    }
+                }
+            };
 
             PKCS10CertificationRequest csr = csrBuilder.build(signer);
 
