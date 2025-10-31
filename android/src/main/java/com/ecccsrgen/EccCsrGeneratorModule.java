@@ -15,6 +15,7 @@ import com.facebook.react.bridge.WritableNativeMap;
 import org.bouncycastle.asn1.ASN1EncodableVector;
 import org.bouncycastle.asn1.ASN1ObjectIdentifier;
 import org.bouncycastle.asn1.DERBitString;
+import org.bouncycastle.asn1.DEROctetString;
 import org.bouncycastle.asn1.DERSequence;
 import org.bouncycastle.asn1.DERSet;
 import org.bouncycastle.asn1.pkcs.PKCSObjectIdentifiers;
@@ -154,7 +155,8 @@ public class EccCsrGeneratorModule extends ReactContextBaseJavaModule {
             if (!ipAddress.isEmpty()) {
                 try {
                     InetAddress inetAddress = InetAddress.getByName(ipAddress);
-                    GeneralName generalName = new GeneralName(GeneralName.iPAddress, inetAddress.getAddress());
+                    // Wrap IP address bytes in DEROctetString for BouncyCastle
+                    GeneralName generalName = new GeneralName(GeneralName.iPAddress, new DEROctetString(inetAddress.getAddress()));
                     GeneralNames subjectAltNames = new GeneralNames(generalName);
                     extensionsGenerator.addExtension(Extension.subjectAlternativeName, false, subjectAltNames);
                 } catch (Exception e) {
