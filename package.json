@@ -1,0 +1,63 @@
+{
+  "name": "react-native-ecc-csr",
+  "version": "1.0.0",
+  "description": "Generate Certificate Signing Requests (CSR) using ECC (P-256, P-384, P-521) for React Native on iOS and Android",
+  "main": "src/index.js",
+  "types": "index.d.ts",
+  "files": [
+    "src",
+    "ios",
+    "android",
+    "index.d.ts",
+    "react-native-ecc-csr.podspec",
+    "README.md",
+    "LICENSE",
+    "CHANGELOG.md",
+    "INSTALLATION.md"
+  ],
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "keywords": [
+    "react-native",
+    "ecc",
+    "csr",
+    "certificate",
+    "elliptic-curve",
+    "cryptography",
+    "P-256",
+    "P-384",
+    "P-521",
+    "secp256r1",
+    "secp384r1",
+    "secp521r1",
+    "ios",
+    "android",
+    "security",
+    "keystore",
+    "keychain",
+    "x509",
+    "pkcs10",
+    "tls",
+    "ssl"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/yourusername/react-native-ecc-csr.git"
+  },
+  "bugs": {
+    "url": "https://github.com/yourusername/react-native-ecc-csr/issues"
+  },
+  "homepage": "https://github.com/yourusername/react-native-ecc-csr#readme",
+  "author": "Your Name <your.email@example.com>",
+  "license": "MIT",
+  "peerDependencies": {
+    "react-native": ">=0.60.0"
+  },
+  "devDependencies": {
+    "react-native": ">=0.60.0"
+  },
+  "engines": {
+    "node": ">=14"
+  }
+}
