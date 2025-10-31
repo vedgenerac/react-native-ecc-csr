@@ -1,0 +1,37 @@
+# OSX
+.DS_Store
+
+# Node
+node_modules/
+npm-debug.log
+yarn-error.log
+
+# iOS
+ios/Pods/
+ios/build/
+*.xcuserstate
+*.xcworkspace
+!default.xcworkspace
+
+# Android
+android/build/
+android/.gradle/
+android/local.properties
+*.iml
+.gradle
+local.properties
+
+# React Native
+.metro-cache/
+.watchmanconfig
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# Misc
+.env
+*.log
