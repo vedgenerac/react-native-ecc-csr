@@ -1,6 +1,6 @@
 {
   "name": "react-native-ecc-csr",
-  "version": "1.0.3",
+  "version": "1.0.5",
   "description": "Generate Certificate Signing Requests (CSR) using ECC (P-256, P-384, P-521) for React Native on iOS and Android",
   "main": "src/index.js",
   "types": "index.d.ts",
