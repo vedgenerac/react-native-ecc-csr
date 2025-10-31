@@ -31,6 +31,11 @@ android {
         sourceCompatibility JavaVersion.VERSION_11
         targetCompatibility JavaVersion.VERSION_11
     }
+
+    packagingOptions {
+        pickFirst 'META-INF/BCKEY.DSA'
+        pickFirst 'META-INF/BCKEY.SF'
+    }
 }
 
 repositories {
@@ -40,5 +45,7 @@ repositories {
 
 dependencies {
     implementation 'com.facebook.react:react-native:+'
-    implementation 'org.bouncycastle:bcpkix-jdk18on:1.78'
+    // Use jdk15on version which is compatible with Android and Jetifier
+    implementation 'org.bouncycastle:bcpkix-jdk15on:1.70'
+    implementation 'org.bouncycastle:bcprov-jdk15on:1.70'
 }
