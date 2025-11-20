@@ -1,276 +1,188 @@
 package com.ecccsr;
 
-import android.security.keystore.KeyGenParameterSpec;
-import android.security.keystore.KeyProperties;
-import android.util.Log;
-
+import android.util.Base64;
+import com.facebook.react.bridge.Promise;
 import com.facebook.react.bridge.ReactApplicationContext;
 import com.facebook.react.bridge.ReactContextBaseJavaModule;
 import com.facebook.react.bridge.ReactMethod;
-import com.facebook.react.bridge.Promise;
+import com.facebook.react.bridge.ReadableMap;
 
-import java.security.KeyPairGenerator;
-import java.security.KeyStore;
-import java.security.PrivateKey;
-import java.security.PublicKey;
-import java.security.spec.ECGenParameterSpec;
-import java.io.StringWriter;
-
-import org.bouncycastle.asn1.ASN1EncodableVector;
+import org.bouncycastle.asn1.ASN1Encodable;
 import org.bouncycastle.asn1.ASN1ObjectIdentifier;
-import org.bouncycastle.asn1.DERBitString;
-import org.bouncycastle.asn1.DEROctetString;
 import org.bouncycastle.asn1.DERSequence;
-import org.bouncycastle.asn1.DERSet;
 import org.bouncycastle.asn1.pkcs.PKCSObjectIdentifiers;
-import org.bouncycastle.asn1.x500.X500NameBuilder;
-import org.bouncycastle.asn1.x500.style.BCStyle;
+import org.bouncycastle.asn1.x500.X500Name;
 import org.bouncycastle.asn1.x509.Extension;
-import org.bouncycastle.asn1.x509.ExtendedKeyUsage;
-import org.bouncycastle.asn1.x509.Extensions;
 import org.bouncycastle.asn1.x509.ExtensionsGenerator;
-import org.bouncycastle.asn1.x509.KeyPurposeId;
+import org.bouncycastle.asn1.x509.GeneralName;
+import org.bouncycastle.asn1.x509.GeneralNames;
 import org.bouncycastle.asn1.x509.KeyUsage;
-import org.bouncycastle.asn1.x509.SubjectPublicKeyInfo;
+import org.bouncycastle.asn1.x509.KeyPurposeId;
+import org.bouncycastle.asn1.x509.ExtendedKeyUsage;
+import org.bouncycastle.jce.provider.BouncyCastleProvider;
+import org.bouncycastle.openssl.jcajce.JcaPEMWriter;
 import org.bouncycastle.operator.ContentSigner;
 import org.bouncycastle.operator.jcajce.JcaContentSignerBuilder;
 import org.bouncycastle.pkcs.PKCS10CertificationRequest;
 import org.bouncycastle.pkcs.PKCS10CertificationRequestBuilder;
-import org.bouncycastle.util.io.pem.PemObject;
-import org.bouncycastle.util.io.pem.PemWriter;
+import org.bouncycastle.pkcs.jcajce.JcaPKCS10CertificationRequestBuilder;
 
-/**
- * CSRModule - Generates ECC Certificate Signing Requests with proper X.509v3
- * extensions
- * for mTLS client authentication
- * 
- * CRITICAL: This version INCLUDES Key Usage and Extended Key Usage extensions
- */
+import java.io.StringWriter;
+import java.security.KeyPair;
+import java.security.KeyPairGenerator;
+import java.security.PrivateKey;
+import java.security.PublicKey;
+import java.security.Security;
+import java.security.spec.ECGenParameterSpec;
+
 public class CSRModule extends ReactContextBaseJavaModule {
-    private static final String TAG = "CSRModule";
-    private static final String KEYSTORE_PROVIDER = "AndroidKeyStore";
-    private static final String DEFAULT_ALIAS = "ECC_CSR_KEY_ALIAS";
+
+    private static final String MODULE_NAME = "CSRModule";
 
     public CSRModule(ReactApplicationContext reactContext) {
         super(reactContext);
+        Security.removeProvider("BC");
+        Security.addProvider(new BouncyCastleProvider());
     }
 
     @Override
     public String getName() {
-        return "CSRModule";
+        return MODULE_NAME;
     }
 
-    /**
-     * Generates ECC key pair in Android Keystore if it doesn't exist
-     */
-    private void generateKeyPairIfNeeded(String alias, String curve) throws Exception {
-        KeyStore keyStore = KeyStore.getInstance(KEYSTORE_PROVIDER);
-        keyStore.load(null);
-
-        if (!keyStore.containsAlias(alias)) {
-            Log.d(TAG, "Generating new ECC key pair with alias: " + alias + ", curve: " + curve);
-
-            KeyPairGenerator keyPairGenerator = KeyPairGenerator.getInstance(
-                    KeyProperties.KEY_ALGORITHM_EC, KEYSTORE_PROVIDER);
-
-            KeyGenParameterSpec.Builder builder = new KeyGenParameterSpec.Builder(
-                    alias,
-                    KeyProperties.PURPOSE_SIGN | KeyProperties.PURPOSE_VERIFY)
-                    .setAlgorithmParameterSpec(new ECGenParameterSpec(curve))
-                    .setDigests(KeyProperties.DIGEST_SHA256,
-                            KeyProperties.DIGEST_SHA384,
-                            KeyProperties.DIGEST_SHA512)
-                    .setUserAuthenticationRequired(false);
-
-            keyPairGenerator.initialize(builder.build());
-            keyPairGenerator.generateKeyPair();
-            Log.d(TAG, "✅ Key pair generated successfully");
-        } else {
-            Log.d(TAG, "Key pair already exists with alias: " + alias);
-        }
-    }
-
-    /**
-     * Generate CSR with X.509v3 extensions
-     * 
-     * @param alias              Keystore alias (use empty string for default)
-     * @param curve              ECC curve: "secp256r1" (P-256), "secp384r1"
-     *                           (P-384), or "secp521r1" (P-521)
-     * @param cn                 Common Name
-     * @param serialNumber       Serial Number
-     * @param country            Country (2-letter code)
-     * @param state              State
-     * @param locality           City
-     * @param organization       Organization
-     * @param organizationalUnit Organizational Unit
-     * @param promise            React Native promise
-     */
     @ReactMethod
-    public void generateCSR(
-            String alias,
-            String curve,
-            String cn,
-            String serialNumber,
-            String country,
-            String state,
-            String locality,
-            String organization,
-            String organizationalUnit,
-            Promise promise) {
-
+    public void generateCSR(ReadableMap params, Promise promise) {
         try {
-            String keyAlias = (alias != null && !alias.isEmpty()) ? alias : DEFAULT_ALIAS;
-            String eccCurve = (curve != null && !curve.isEmpty()) ? curve : "secp256r1";
+            // Extract parameters
+            String country = params.hasKey("country") ? params.getString("country") : "US";
+            String state = params.hasKey("state") ? params.getString("state") : "Nevada";
+            String locality = params.hasKey("locality") ? params.getString("locality") : "Reno";
+            String organization = params.hasKey("organization") ? params.getString("organization") : "Generac";
+            String organizationalUnit = params.hasKey("organizationalUnit") ? params.getString("organizationalUnit") : "PWRview";
+            String commonName = params.hasKey("commonName") ? params.getString("commonName") : "";
+            String serialNumber = params.hasKey("serialNumber") ? params.getString("serialNumber") : "";
+            String ipAddress = params.hasKey("ipAddress") ? params.getString("ipAddress") : "10.10.10.10";
 
-            Log.d(TAG, "════════════════════════════════════════");
-            Log.d(TAG, "Generating CSR with extensions");
-            Log.d(TAG, "Alias: " + keyAlias);
-            Log.d(TAG, "Curve: " + eccCurve);
-            Log.d(TAG, "CN: " + cn);
-            Log.d(TAG, "serialNumber: " + serialNumber);
-            Log.d(TAG, "════════════════════════════════════════");
+            // Generate EC P-384 key pair
+            KeyPairGenerator keyPairGenerator = KeyPairGenerator.getInstance("EC", "BC");
+            ECGenParameterSpec ecSpec = new ECGenParameterSpec("secp384r1"); // P-384
+            keyPairGenerator.initialize(ecSpec);
+            KeyPair keyPair = keyPairGenerator.generateKeyPair();
 
-            // Generate key pair if needed
-            generateKeyPairIfNeeded(keyAlias, eccCurve);
+            PrivateKey privateKey = keyPair.getPrivate();
+            PublicKey publicKey = keyPair.getPublic();
 
-            // Load keystore and get keys
-            KeyStore keyStore = KeyStore.getInstance(KEYSTORE_PROVIDER);
-            keyStore.load(null);
-
-            PrivateKey privateKey = (PrivateKey) keyStore.getKey(keyAlias, null);
-            PublicKey publicKey = keyStore.getCertificate(keyAlias).getPublicKey();
-
-            if (privateKey == null || publicKey == null) {
-                throw new Exception("Failed to retrieve keys from keystore");
-            }
-
-            // Build subject DN in proper order: C, ST, L, O, OU, CN, serialNumber
-            X500NameBuilder nameBuilder = new X500NameBuilder(BCStyle.INSTANCE);
-            if (country != null && !country.isEmpty()) {
-                nameBuilder.addRDN(BCStyle.C, country);
-            }
-            if (state != null && !state.isEmpty()) {
-                nameBuilder.addRDN(BCStyle.ST, state);
-            }
-            if (locality != null && !locality.isEmpty()) {
-                nameBuilder.addRDN(BCStyle.L, locality);
-            }
-            if (organization != null && !organization.isEmpty()) {
-                nameBuilder.addRDN(BCStyle.O, organization);
-            }
-            if (organizationalUnit != null && !organizationalUnit.isEmpty()) {
-                nameBuilder.addRDN(BCStyle.OU, organizationalUnit);
-            }
-            if (cn != null && !cn.isEmpty()) {
-                nameBuilder.addRDN(BCStyle.CN, cn);
-            }
-            if (serialNumber != null && !serialNumber.isEmpty()) {
-                nameBuilder.addRDN(BCStyle.SERIALNUMBER, serialNumber);
+            // Build the subject DN
+            StringBuilder subjectBuilder = new StringBuilder();
+            subjectBuilder.append("C=").append(country);
+            subjectBuilder.append(", ST=").append(state);
+            subjectBuilder.append(", L=").append(locality);
+            subjectBuilder.append(", O=").append(organization);
+            subjectBuilder.append(", OU=").append(organizationalUnit);
+            subjectBuilder.append(", CN=").append(commonName);
+            if (!serialNumber.isEmpty()) {
+                subjectBuilder.append(", serialNumber=").append(serialNumber);
             }
 
-            // Convert public key to SubjectPublicKeyInfo
-            SubjectPublicKeyInfo subjectPublicKeyInfo = SubjectPublicKeyInfo.getInstance(
-                    publicKey.getEncoded());
+            X500Name subject = new X500Name(subjectBuilder.toString());
 
             // Create CSR builder
-            PKCS10CertificationRequestBuilder csrBuilder = new PKCS10CertificationRequestBuilder(
-                    nameBuilder.build(), subjectPublicKeyInfo);
+            PKCS10CertificationRequestBuilder csrBuilder = 
+                new JcaPKCS10CertificationRequestBuilder(subject, publicKey);
 
-            // ═══════════════════════════════════════════════════════════════
-            // CRITICAL: Add X.509v3 Extensions for mTLS
-            // ═══════════════════════════════════════════════════════════════
+            // Create extensions
+            ExtensionsGenerator extGen = new ExtensionsGenerator();
 
-            ExtensionsGenerator extensionsGenerator = new ExtensionsGenerator();
-
-            // 1. Key Usage: Digital Signature, Key Agreement (CRITICAL)
+            // Add Key Usage (critical): Digital Signature, Key Agreement
             KeyUsage keyUsage = new KeyUsage(
-                    KeyUsage.digitalSignature | KeyUsage.keyAgreement);
-            extensionsGenerator.addExtension(
-                    Extension.keyUsage,
-                    true, // critical = true
-                    keyUsage);
-            Log.d(TAG, "✅ Added Key Usage: digitalSignature, keyAgreement (critical)");
+                KeyUsage.digitalSignature | KeyUsage.keyAgreement
+            );
+            extGen.addExtension(Extension.keyUsage, true, keyUsage);
 
-            // 2. Extended Key Usage: TLS Web Client Authentication
+            // Add Extended Key Usage: TLS Web Client Authentication
             ExtendedKeyUsage extendedKeyUsage = new ExtendedKeyUsage(
-                    KeyPurposeId.id_kp_clientAuth);
-            extensionsGenerator.addExtension(
-                    Extension.extendedKeyUsage,
-                    false, // critical = false
-                    extendedKeyUsage);
-            Log.d(TAG, "✅ Added Extended Key Usage: clientAuth");
+                KeyPurposeId.id_kp_clientAuth
+            );
+            extGen.addExtension(Extension.extendedKeyUsage, false, extendedKeyUsage);
 
-            Extensions extensions = extensionsGenerator.generate();
+            // Add Subject Alternative Name: IP Address
+            GeneralName[] sanArray = new GeneralName[1];
+            sanArray[0] = new GeneralName(GeneralName.iPAddress, ipAddress);
+            GeneralNames subjectAltNames = new GeneralNames(sanArray);
+            extGen.addExtension(Extension.subjectAlternativeName, false, subjectAltNames);
 
-            // Add extensions as an attribute to the CSR
+            // Add extensions to CSR
             csrBuilder.addAttribute(
-                    PKCSObjectIdentifiers.pkcs_9_at_extensionRequest,
-                    extensions);
-            Log.d(TAG, "✅ Extensions added to CSR");
+                PKCSObjectIdentifiers.pkcs_9_at_extensionRequest,
+                extGen.generate()
+            );
 
-            // ═══════════════════════════════════════════════════════════════
-            // Sign and build the CSR
-            // ═══════════════════════════════════════════════════════════════
+            // Sign the CSR with SHA256withECDSA
+            ContentSigner signer = new JcaContentSignerBuilder("SHA256withECDSA")
+                .setProvider("BC")
+                .build(privateKey);
 
-            // Determine signature algorithm based on curve
-            String signatureAlgorithm;
-            if (eccCurve.equals("secp256r1")) {
-                signatureAlgorithm = "SHA256withECDSA";
-            } else if (eccCurve.equals("secp384r1")) {
-                signatureAlgorithm = "SHA384withECDSA";
-            } else if (eccCurve.equals("secp521r1")) {
-                signatureAlgorithm = "SHA512withECDSA";
-            } else {
-                signatureAlgorithm = "SHA256withECDSA"; // default
-            }
-
-            Log.d(TAG, "Using signature algorithm: " + signatureAlgorithm);
-
-            JcaContentSignerBuilder signerBuilder = new JcaContentSignerBuilder(signatureAlgorithm);
-            ContentSigner signer = signerBuilder.build(privateKey);
             PKCS10CertificationRequest csr = csrBuilder.build(signer);
 
-            // Convert to PEM format
-            StringWriter stringWriter = new StringWriter();
-            try (PemWriter pemWriter = new PemWriter(stringWriter)) {
-                pemWriter.writeObject(new PemObject("CERTIFICATE REQUEST", csr.getEncoded()));
-            }
+            // Convert CSR to PEM format
+            StringWriter csrWriter = new StringWriter();
+            JcaPEMWriter pemWriter = new JcaPEMWriter(csrWriter);
+            pemWriter.writeObject(csr);
+            pemWriter.close();
+            String csrPem = csrWriter.toString();
 
-            String csrPem = stringWriter.toString();
-            Log.d(TAG, "════════════════════════════════════════");
-            Log.d(TAG, "✅ CSR Generated Successfully with Extensions!");
-            Log.d(TAG, "════════════════════════════════════════");
+            // Convert private key to PEM format
+            StringWriter keyWriter = new StringWriter();
+            JcaPEMWriter keyPemWriter = new JcaPEMWriter(keyWriter);
+            keyPemWriter.writeObject(keyPair);
+            keyPemWriter.close();
+            String privateKeyPem = keyWriter.toString();
 
-            promise.resolve(csrPem);
+            // Prepare response
+            com.facebook.react.bridge.WritableMap response = 
+                com.facebook.react.bridge.Arguments.createMap();
+            response.putString("csr", csrPem);
+            response.putString("privateKey", privateKeyPem);
+            response.putString("publicKey", Base64.encodeToString(publicKey.getEncoded(), Base64.NO_WRAP));
+
+            promise.resolve(response);
 
         } catch (Exception e) {
-            Log.e(TAG, "❌ CSR generation failed", e);
-            promise.reject("CSR_ERROR", "Failed to generate CSR: " + e.getMessage(), e);
+            promise.reject("CSR_GENERATION_ERROR", "Failed to generate CSR: " + e.getMessage(), e);
         }
     }
 
-    /**
-     * Delete key from keystore
-     */
     @ReactMethod
-    public void deleteKey(String alias, Promise promise) {
+    public void generateKeyPair(Promise promise) {
         try {
-            String keyAlias = (alias != null && !alias.isEmpty()) ? alias : DEFAULT_ALIAS;
+            // Generate EC P-384 key pair
+            KeyPairGenerator keyPairGenerator = KeyPairGenerator.getInstance("EC", "BC");
+            ECGenParameterSpec ecSpec = new ECGenParameterSpec("secp384r1"); // P-384
+            keyPairGenerator.initialize(ecSpec);
+            KeyPair keyPair = keyPairGenerator.generateKeyPair();
 
-            KeyStore keyStore = KeyStore.getInstance(KEYSTORE_PROVIDER);
-            keyStore.load(null);
+            // Convert to PEM format
+            StringWriter keyWriter = new StringWriter();
+            JcaPEMWriter keyPemWriter = new JcaPEMWriter(keyWriter);
+            keyPemWriter.writeObject(keyPair);
+            keyPemWriter.close();
+            String privateKeyPem = keyWriter.toString();
 
-            if (keyStore.containsAlias(keyAlias)) {
-                keyStore.deleteEntry(keyAlias);
-                Log.d(TAG, "✅ Deleted key with alias: " + keyAlias);
-                promise.resolve("Key deleted successfully");
-            } else {
-                Log.w(TAG, "⚠️ Key not found with alias: " + keyAlias);
-                promise.resolve("Key not found");
-            }
+            // Get public key as Base64
+            String publicKeyBase64 = Base64.encodeToString(
+                keyPair.getPublic().getEncoded(), 
+                Base64.NO_WRAP
+            );
+
+            com.facebook.react.bridge.WritableMap response = 
+                com.facebook.react.bridge.Arguments.createMap();
+            response.putString("privateKey", privateKeyPem);
+            response.putString("publicKey", publicKeyBase64);
+
+            promise.resolve(response);
+
         } catch (Exception e) {
-            Log.e(TAG, "❌ Failed to delete key", e);
-            promise.reject("DELETE_ERROR", "Failed to delete key: " + e.getMessage(), e);
+            promise.reject("KEY_GENERATION_ERROR", "Failed to generate key pair: " + e.getMessage(), e);
         }
     }
 }
