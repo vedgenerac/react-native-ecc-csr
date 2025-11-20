@@ -20,13 +20,18 @@ import org.bouncycastle.asn1.x509.KeyPurposeId;
 import org.bouncycastle.asn1.x509.ExtendedKeyUsage;
 import org.bouncycastle.jce.provider.BouncyCastleProvider;
 import org.bouncycastle.openssl.jcajce.JcaPEMWriter;
+import org.bouncycastle.asn1.x509.AlgorithmIdentifier;
+import org.bouncycastle.asn1.pkcs.PKCSObjectIdentifiers;
 import org.bouncycastle.operator.ContentSigner;
-import org.bouncycastle.operator.jcajce.JcaContentSignerBuilder;
+import org.bouncycastle.operator.DefaultSignatureAlgorithmIdentifierFinder;
 import org.bouncycastle.pkcs.PKCS10CertificationRequest;
 import org.bouncycastle.pkcs.PKCS10CertificationRequestBuilder;
 import org.bouncycastle.pkcs.jcajce.JcaPKCS10CertificationRequestBuilder;
 
+import java.io.ByteArrayOutputStream;
+import java.io.OutputStream;
 import java.io.StringWriter;
+import java.security.Signature;
 import java.security.KeyPair;
 import java.security.KeyPairGenerator;
 import java.security.KeyStore;
@@ -49,6 +54,45 @@ public class CSRModule extends ReactContextBaseJavaModule {
     @Override
     public String getName() {
         return MODULE_NAME;
+    }
+
+    /**
+     * Custom ContentSigner implementation for Android Keystore
+     * Android Keystore requires using Signature API directly, not through BouncyCastle
+     */
+    private static class AndroidKeystoreContentSigner implements ContentSigner {
+        private final ByteArrayOutputStream outputStream;
+        private final AlgorithmIdentifier sigAlgId;
+        private final Signature signature;
+
+        public AndroidKeystoreContentSigner(PrivateKey privateKey, String algorithm) throws Exception {
+            this.outputStream = new ByteArrayOutputStream();
+            this.sigAlgId = new DefaultSignatureAlgorithmIdentifierFinder().find(algorithm);
+            
+            // Use Android's Signature class, not BouncyCastle
+            this.signature = Signature.getInstance(algorithm);
+            this.signature.initSign(privateKey);
+        }
+
+        @Override
+        public AlgorithmIdentifier getAlgorithmIdentifier() {
+            return sigAlgId;
+        }
+
+        @Override
+        public OutputStream getOutputStream() {
+            return outputStream;
+        }
+
+        @Override
+        public byte[] getSignature() {
+            try {
+                signature.update(outputStream.toByteArray());
+                return signature.sign();
+            } catch (Exception e) {
+                throw new RuntimeException("Failed to sign", e);
+            }
+        }
     }
 
     @ReactMethod
@@ -167,11 +211,9 @@ public class CSRModule extends ReactContextBaseJavaModule {
                 extGen.generate()
             );
 
-            // Sign the CSR with SHA256withECDSA
-            // Note: Signing happens in hardware using the private key alias
-            ContentSigner signer = new JcaContentSignerBuilder("SHA256withECDSA")
-                .setProvider(ANDROID_KEYSTORE)
-                .build(privateKey);
+            // Sign the CSR using Android Keystore
+            // Use custom ContentSigner because Android Keystore doesn't work with BouncyCastle's builder
+            ContentSigner signer = new AndroidKeystoreContentSigner(privateKey, "SHA256withECDSA");
 
             PKCS10CertificationRequest csr = csrBuilder.build(signer);
 
@@ -232,10 +274,16 @@ public class CSRModule extends ReactContextBaseJavaModule {
                 return;
             }
 
-            PublicKey publicKey = keyStore.getCertificate(privateKeyAlias).getPublicKey();
-            String publicKeyBase64 = Base64.encodeToString(publicKey.getEncoded(), Base64.NO_WRAP);
-            
-            promise.resolve(publicKeyBase64);
+            // Get the public key from the KeyStore entry
+            KeyStore.Entry entry = keyStore.getEntry(privateKeyAlias, null);
+            if (entry instanceof KeyStore.PrivateKeyEntry) {
+                KeyStore.PrivateKeyEntry privateKeyEntry = (KeyStore.PrivateKeyEntry) entry;
+                PublicKey publicKey = privateKeyEntry.getCertificate().getPublicKey();
+                String publicKeyBase64 = Base64.encodeToString(publicKey.getEncoded(), Base64.NO_WRAP);
+                promise.resolve(publicKeyBase64);
+            } else {
+                promise.reject("INVALID_ENTRY", "Entry is not a private key entry");
+            }
         } catch (Exception e) {
             promise.reject("GET_PUBLIC_KEY_ERROR", "Failed to get public key: " + e.getMessage(), e);
         }
