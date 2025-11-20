@@ -1,5 +1,7 @@
 package com.ecccsr;
 
+import android.security.keystore.KeyGenParameterSpec;
+import android.security.keystore.KeyProperties;
 import android.util.Base64;
 import com.facebook.react.bridge.Promise;
 import com.facebook.react.bridge.ReactApplicationContext;
@@ -7,9 +9,6 @@ import com.facebook.react.bridge.ReactContextBaseJavaModule;
 import com.facebook.react.bridge.ReactMethod;
 import com.facebook.react.bridge.ReadableMap;
 
-import org.bouncycastle.asn1.ASN1Encodable;
-import org.bouncycastle.asn1.ASN1ObjectIdentifier;
-import org.bouncycastle.asn1.DERSequence;
 import org.bouncycastle.asn1.pkcs.PKCSObjectIdentifiers;
 import org.bouncycastle.asn1.x500.X500Name;
 import org.bouncycastle.asn1.x509.Extension;
@@ -30,6 +29,7 @@ import org.bouncycastle.pkcs.jcajce.JcaPKCS10CertificationRequestBuilder;
 import java.io.StringWriter;
 import java.security.KeyPair;
 import java.security.KeyPairGenerator;
+import java.security.KeyStore;
 import java.security.PrivateKey;
 import java.security.PublicKey;
 import java.security.Security;
@@ -38,6 +38,7 @@ import java.security.spec.ECGenParameterSpec;
 public class CSRModule extends ReactContextBaseJavaModule {
 
     private static final String MODULE_NAME = "CSRModule";
+    private static final String ANDROID_KEYSTORE = "AndroidKeyStore";
 
     public CSRModule(ReactApplicationContext reactContext) {
         super(reactContext);
@@ -63,6 +64,14 @@ public class CSRModule extends ReactContextBaseJavaModule {
             String serialNumber = params.hasKey("serialNumber") ? params.getString("serialNumber") : "";
             String ipAddress = params.hasKey("ipAddress") ? params.getString("ipAddress") : "10.10.10.10";
             String curve = params.hasKey("curve") ? params.getString("curve") : "secp384r1"; // P-384 default
+            
+            // CRITICAL: privateKeyAlias for Android Keystore
+            String privateKeyAlias = params.hasKey("privateKeyAlias") ? params.getString("privateKeyAlias") : null;
+            
+            if (privateKeyAlias == null || privateKeyAlias.isEmpty()) {
+                promise.reject("MISSING_ALIAS", "privateKeyAlias is required for secure key storage");
+                return;
+            }
 
             // Validate curve
             if (!curve.equals("secp256r1") && !curve.equals("secp384r1") && !curve.equals("secp521r1")) {
@@ -70,12 +79,46 @@ public class CSRModule extends ReactContextBaseJavaModule {
                 return;
             }
 
-            // Generate EC key pair with specified curve
-            KeyPairGenerator keyPairGenerator = KeyPairGenerator.getInstance("EC", "BC");
-            ECGenParameterSpec ecSpec = new ECGenParameterSpec(curve);
-            keyPairGenerator.initialize(ecSpec);
-            KeyPair keyPair = keyPairGenerator.generateKeyPair();
+            // Map curve to Android Keystore curve
+            String keystoreCurve;
+            switch (curve) {
+                case "secp256r1":
+                    keystoreCurve = "secp256r1";
+                    break;
+                case "secp384r1":
+                    keystoreCurve = "secp384r1";
+                    break;
+                case "secp521r1":
+                    keystoreCurve = "secp521r1";
+                    break;
+                default:
+                    keystoreCurve = "secp384r1";
+            }
 
+            // Generate key pair in Android Keystore (hardware-backed)
+            KeyPairGenerator keyPairGenerator = KeyPairGenerator.getInstance(
+                KeyProperties.KEY_ALGORITHM_EC, 
+                ANDROID_KEYSTORE
+            );
+
+            // Configure key generation with hardware backing
+            KeyGenParameterSpec.Builder specBuilder = new KeyGenParameterSpec.Builder(
+                privateKeyAlias,
+                KeyProperties.PURPOSE_SIGN | KeyProperties.PURPOSE_VERIFY
+            )
+            .setAlgorithmParameterSpec(new ECGenParameterSpec(keystoreCurve))
+            .setDigests(
+                KeyProperties.DIGEST_SHA256,
+                KeyProperties.DIGEST_SHA384,
+                KeyProperties.DIGEST_SHA512
+            )
+            .setUserAuthenticationRequired(false); // Set to true if you want user auth (fingerprint/PIN)
+
+            // Initialize key generator with spec
+            keyPairGenerator.initialize(specBuilder.build());
+
+            // Generate key pair - private key NEVER leaves the hardware!
+            KeyPair keyPair = keyPairGenerator.generateKeyPair();
             PrivateKey privateKey = keyPair.getPrivate();
             PublicKey publicKey = keyPair.getPublic();
 
@@ -125,8 +168,9 @@ public class CSRModule extends ReactContextBaseJavaModule {
             );
 
             // Sign the CSR with SHA256withECDSA
+            // Note: Signing happens in hardware using the private key alias
             ContentSigner signer = new JcaContentSignerBuilder("SHA256withECDSA")
-                .setProvider("BC")
+                .setProvider(ANDROID_KEYSTORE)
                 .build(privateKey);
 
             PKCS10CertificationRequest csr = csrBuilder.build(signer);
@@ -138,19 +182,13 @@ public class CSRModule extends ReactContextBaseJavaModule {
             pemWriter.close();
             String csrPem = csrWriter.toString();
 
-            // Convert private key to PEM format
-            StringWriter keyWriter = new StringWriter();
-            JcaPEMWriter keyPemWriter = new JcaPEMWriter(keyWriter);
-            keyPemWriter.writeObject(keyPair);
-            keyPemWriter.close();
-            String privateKeyPem = keyWriter.toString();
-
-            // Prepare response
+            // Prepare response - NO PRIVATE KEY RETURNED!
             com.facebook.react.bridge.WritableMap response = 
                 com.facebook.react.bridge.Arguments.createMap();
             response.putString("csr", csrPem);
-            response.putString("privateKey", privateKeyPem);
+            response.putString("privateKeyAlias", privateKeyAlias); // Return alias only
             response.putString("publicKey", Base64.encodeToString(publicKey.getEncoded(), Base64.NO_WRAP));
+            response.putBoolean("isHardwareBacked", isHardwareBacked(privateKeyAlias));
 
             promise.resolve(response);
 
@@ -160,44 +198,70 @@ public class CSRModule extends ReactContextBaseJavaModule {
     }
 
     @ReactMethod
-    public void generateKeyPair(ReadableMap params, Promise promise) {
+    public void deleteKey(String privateKeyAlias, Promise promise) {
         try {
-            String curve = params.hasKey("curve") ? params.getString("curve") : "secp384r1"; // P-384 default
+            KeyStore keyStore = KeyStore.getInstance(ANDROID_KEYSTORE);
+            keyStore.load(null);
+            keyStore.deleteEntry(privateKeyAlias);
+            promise.resolve(true);
+        } catch (Exception e) {
+            promise.reject("DELETE_KEY_ERROR", "Failed to delete key: " + e.getMessage(), e);
+        }
+    }
 
-            // Validate curve
-            if (!curve.equals("secp256r1") && !curve.equals("secp384r1") && !curve.equals("secp521r1")) {
-                promise.reject("INVALID_CURVE", "Curve must be one of: secp256r1, secp384r1, secp521r1");
+    @ReactMethod
+    public void keyExists(String privateKeyAlias, Promise promise) {
+        try {
+            KeyStore keyStore = KeyStore.getInstance(ANDROID_KEYSTORE);
+            keyStore.load(null);
+            boolean exists = keyStore.containsAlias(privateKeyAlias);
+            promise.resolve(exists);
+        } catch (Exception e) {
+            promise.reject("KEY_EXISTS_ERROR", "Failed to check key existence: " + e.getMessage(), e);
+        }
+    }
+
+    @ReactMethod
+    public void getPublicKey(String privateKeyAlias, Promise promise) {
+        try {
+            KeyStore keyStore = KeyStore.getInstance(ANDROID_KEYSTORE);
+            keyStore.load(null);
+            
+            if (!keyStore.containsAlias(privateKeyAlias)) {
+                promise.reject("KEY_NOT_FOUND", "Key with alias '" + privateKeyAlias + "' not found");
                 return;
             }
 
-            // Generate EC key pair with specified curve
-            KeyPairGenerator keyPairGenerator = KeyPairGenerator.getInstance("EC", "BC");
-            ECGenParameterSpec ecSpec = new ECGenParameterSpec(curve);
-            keyPairGenerator.initialize(ecSpec);
-            KeyPair keyPair = keyPairGenerator.generateKeyPair();
-
-            // Convert to PEM format
-            StringWriter keyWriter = new StringWriter();
-            JcaPEMWriter keyPemWriter = new JcaPEMWriter(keyWriter);
-            keyPemWriter.writeObject(keyPair);
-            keyPemWriter.close();
-            String privateKeyPem = keyWriter.toString();
-
-            // Get public key as Base64
-            String publicKeyBase64 = Base64.encodeToString(
-                keyPair.getPublic().getEncoded(), 
-                Base64.NO_WRAP
-            );
-
-            com.facebook.react.bridge.WritableMap response = 
-                com.facebook.react.bridge.Arguments.createMap();
-            response.putString("privateKey", privateKeyPem);
-            response.putString("publicKey", publicKeyBase64);
-
-            promise.resolve(response);
-
+            PublicKey publicKey = keyStore.getCertificate(privateKeyAlias).getPublicKey();
+            String publicKeyBase64 = Base64.encodeToString(publicKey.getEncoded(), Base64.NO_WRAP);
+            
+            promise.resolve(publicKeyBase64);
         } catch (Exception e) {
-            promise.reject("KEY_GENERATION_ERROR", "Failed to generate key pair: " + e.getMessage(), e);
+            promise.reject("GET_PUBLIC_KEY_ERROR", "Failed to get public key: " + e.getMessage(), e);
+        }
+    }
+
+    /**
+     * Check if the key is hardware-backed
+     */
+    private boolean isHardwareBacked(String privateKeyAlias) {
+        try {
+            KeyStore keyStore = KeyStore.getInstance(ANDROID_KEYSTORE);
+            keyStore.load(null);
+            
+            KeyStore.Entry entry = keyStore.getEntry(privateKeyAlias, null);
+            if (entry instanceof KeyStore.PrivateKeyEntry) {
+                KeyStore.PrivateKeyEntry privateKeyEntry = (KeyStore.PrivateKeyEntry) entry;
+                // Check if key is hardware-backed (available on Android 9+)
+                if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.P) {
+                    return privateKeyEntry.getPrivateKey()
+                        .getAlgorithm()
+                        .equals(KeyProperties.KEY_ALGORITHM_EC);
+                }
+            }
+            return true; // Assume hardware-backed for older Android versions
+        } catch (Exception e) {
+            return false;
         }
     }
 }

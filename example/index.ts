@@ -1,10 +1,14 @@
 import CSRModule, { CSRParams } from 'react-native-ecc-csr';
 
 /**
- * Example 1: Generate CSR with all parameters (using default P-384 curve)
+ * SECURE Example: Generate CSR with hardware-backed key storage
+ * The private key NEVER leaves the Android Keystore hardware
  */
-async function generateCSRExample() {
+async function generateSecureCSR() {
     try {
+        // IMPORTANT: Generate a unique alias for this device/certificate
+        const privateKeyAlias = `pwrview_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
+
         const params: CSRParams = {
             country: "US",
             state: "Nevada",
@@ -14,194 +18,290 @@ async function generateCSRExample() {
             commonName: "5dab25dd-7d0a-4a03-94c3-39f935c0a48a",
             serialNumber: "APCBPGN2202-AF250300028",
             ipAddress: "10.10.10.10",
-            curve: "secp384r1" // P-384 (default if not specified)
+            curve: "secp384r1",
+            privateKeyAlias: privateKeyAlias  // REQUIRED for secure storage
         };
 
         const result = await CSRModule.generateCSR(params);
 
-        console.log("CSR Generated:");
-        console.log("==============");
-        console.log("CSR:\n", result.csr);
-        console.log("\nPrivate Key:\n", result.privateKey);
-        console.log("\nPublic Key:\n", result.publicKey);
+        console.log("✅ CSR Generated Securely!");
+        console.log("CSR:", result.csr);
+        console.log("Private Key Alias:", result.privateKeyAlias);
+        console.log("Public Key:", result.publicKey);
+        console.log("Hardware-Backed:", result.isHardwareBacked);
 
-        // Save to file or send to server
-        // await saveToFile('csr.pem', result.csr);
-        // await saveToFile('private_key.pem', result.privateKey);
+        // CRITICAL: Store the alias securely (e.g., encrypted shared preferences)
+        // You'll need this alias later for signing operations or to retrieve the certificate
+        await securelyStoreAlias(result.privateKeyAlias);
+
+        // Send CSR to your CA server
+        await sendCSRToCertificateAuthority(result.csr);
 
         return result;
     } catch (error) {
-        console.error("Error generating CSR:", error);
+        console.error("Error generating secure CSR:", error);
         throw error;
     }
 }
 
 /**
- * Example 2: Generate CSR with minimal parameters (using defaults)
+ * Using device-specific alias
  */
-async function generateMinimalCSR() {
+async function generateCSRForDevice(deviceId: string, serialNumber: string) {
     try {
-        const params: CSRParams = {
-            commonName: "device-12345",
-            serialNumber: "SN-67890"
-        };
+        // Use device-specific alias
+        const privateKeyAlias = `device_${deviceId}_cert`;
 
-        const result = await CSRModule.generateCSR(params);
-        return result;
-    } catch (error) {
-        console.error("Error generating minimal CSR:", error);
-        throw error;
-    }
-}
-
-/**
- * Example 3: Generate just a key pair (default P-384)
- */
-async function generateKeyPairExample() {
-    try {
-        const keyPair = await CSRModule.generateKeyPair({ curve: "secp384r1" });
-
-        console.log("Key Pair Generated:");
-        console.log("==================");
-        console.log("Private Key:\n", keyPair.privateKey);
-        console.log("\nPublic Key:\n", keyPair.publicKey);
-
-        return keyPair;
-    } catch (error) {
-        console.error("Error generating key pair:", error);
-        throw error;
-    }
-}
-
-/**
- * Example 4: Generate CSR with custom IP address
- */
-async function generateCSRWithCustomIP() {
-    try {
-        const params: CSRParams = {
-            country: "US",
-            state: "California",
-            locality: "San Francisco",
-            organization: "My Company",
-            organizationalUnit: "IT",
-            commonName: "api.mycompany.com",
-            serialNumber: "DEVICE-001",
-            ipAddress: "192.168.1.100"  // Custom IP
-        };
-
-        const result = await CSRModule.generateCSR(params);
-        return result;
-    } catch (error) {
-        console.error("Error generating CSR with custom IP:", error);
-        throw error;
-    }
-}
-
-/**
- * Example 5: Generate CSR with P-256 curve (smaller, faster)
- */
-async function generateCSRWithP256() {
-    try {
-        const params: CSRParams = {
-            country: "US",
-            state: "Texas",
-            locality: "Austin",
-            organization: "Tech Corp",
-            organizationalUnit: "Security",
-            commonName: "device-p256",
-            serialNumber: "P256-001",
-            ipAddress: "10.0.0.1",
-            curve: "secp256r1"  // P-256 curve
-        };
-
-        const result = await CSRModule.generateCSR(params);
-        console.log("CSR with P-256 curve generated");
-        return result;
-    } catch (error) {
-        console.error("Error generating CSR with P-256:", error);
-        throw error;
-    }
-}
-
-/**
- * Example 6: Generate CSR with P-521 curve (maximum security)
- */
-async function generateCSRWithP521() {
-    try {
-        const params: CSRParams = {
-            country: "US",
-            state: "New York",
-            locality: "New York",
-            organization: "High Security Corp",
-            organizationalUnit: "Cryptography",
-            commonName: "device-p521",
-            serialNumber: "P521-001",
-            ipAddress: "10.0.0.2",
-            curve: "secp521r1"  // P-521 curve (highest security)
-        };
-
-        const result = await CSRModule.generateCSR(params);
-        console.log("CSR with P-521 curve generated");
-        return result;
-    } catch (error) {
-        console.error("Error generating CSR with P-521:", error);
-        throw error;
-    }
-}
-
-/**
- * Example 7: Generate key pair with P-256
- */
-async function generateP256KeyPair() {
-    try {
-        const keyPair = await CSRModule.generateKeyPair({ curve: "secp256r1" });
-        console.log("P-256 key pair generated");
-        return keyPair;
-    } catch (error) {
-        console.error("Error generating P-256 key pair:", error);
-        throw error;
-    }
-}
-
-/**
- * Example 8: Generate key pair with P-521
- */
-async function generateP521KeyPair() {
-    try {
-        const keyPair = await CSRModule.generateKeyPair({ curve: "secp521r1" });
-        console.log("P-521 key pair generated");
-        return keyPair;
-    } catch (error) {
-        console.error("Error generating P-521 key pair:", error);
-        throw error;
-    }
-}
-
-// Usage in a React Native component
-export function CSRComponent() {
-    const handleGenerateCSR = async () => {
-        try {
-            const result = await generateCSRExample();
-            // Do something with the result
-            console.log("CSR generation successful!");
-        } catch (error) {
-            console.error("Failed to generate CSR:", error);
+        // Check if key already exists
+        const exists = await CSRModule.keyExists(privateKeyAlias);
+        if (exists) {
+            console.log("⚠️ Key already exists. Delete it first or use a different alias.");
+            // Optionally delete the old key
+            // await CSRModule.deleteKey(privateKeyAlias);
+            throw new Error("Key already exists");
         }
-    };
 
-    return (
-        // Your UI component here
-        null
-    );
+        const params: CSRParams = {
+            country: "US",
+            state: "Nevada",
+            locality: "Reno",
+            organization: "Generac",
+            organizationalUnit: "PWRview",
+            commonName: deviceId,
+            serialNumber: serialNumber,
+            ipAddress: "10.10.10.10",
+            curve: "secp384r1",
+            privateKeyAlias: privateKeyAlias
+        };
+
+        const result = await CSRModule.generateCSR(params);
+
+        console.log("✅ Secure CSR generated for device:", deviceId);
+        console.log("Hardware-backed:", result.isHardwareBacked);
+
+        return result;
+    } catch (error) {
+        console.error("Error generating CSR for device:", error);
+        throw error;
+    }
+}
+
+/**
+ * Check if key exists before generating
+ */
+async function checkAndGenerateCSR(alias: string) {
+    try {
+        const exists = await CSRModule.keyExists(alias);
+
+        if (exists) {
+            console.log("✅ Key already exists. Retrieving public key...");
+            const publicKey = await CSRModule.getPublicKey(alias);
+            return { exists: true, publicKey };
+        }
+
+        console.log("Key doesn't exist. Generating new CSR...");
+        const result = await CSRModule.generateCSR({
+            commonName: "new-device",
+            privateKeyAlias: alias
+        });
+
+        return { exists: false, result };
+    } catch (error) {
+        console.error("Error:", error);
+        throw error;
+    }
+}
+
+/**
+ * Delete a key when device is decommissioned or certificate expires
+ */
+async function deleteDeviceKey(deviceId: string) {
+    try {
+        const privateKeyAlias = `device_${deviceId}_cert`;
+
+        const exists = await CSRModule.keyExists(privateKeyAlias);
+        if (!exists) {
+            console.log("Key doesn't exist");
+            return false;
+        }
+
+        await CSRModule.deleteKey(privateKeyAlias);
+        console.log("✅ Key deleted successfully");
+        return true;
+    } catch (error) {
+        console.error("Error deleting key:", error);
+        throw error;
+    }
+}
+
+/**
+ * Certificate renewal workflow
+ */
+async function renewCertificate(oldAlias: string) {
+    try {
+        // Generate new key pair with new alias
+        const newAlias = `${oldAlias}_renewed_${Date.now()}`;
+
+        const result = await CSRModule.generateCSR({
+            country: "US",
+            state: "Nevada",
+            organization: "Generac",
+            organizationalUnit: "PWRview",
+            commonName: "5dab25dd-7d0a-4a03-94c3-39f935c0a48a",
+            serialNumber: "APCBPGN2202-AF250300028",
+            ipAddress: "10.10.10.10",
+            privateKeyAlias: newAlias
+        });
+
+        console.log("✅ New CSR generated for renewal");
+
+        // Send CSR to CA, get new certificate
+        await sendCSRToCertificateAuthority(result.csr);
+
+        // After successful certificate installation, delete old key
+        await CSRModule.deleteKey(oldAlias);
+        console.log("✅ Old key deleted");
+
+        return result;
+    } catch (error) {
+        console.error("Error renewing certificate:", error);
+        throw error;
+    }
+}
+
+/**
+ * Retrieve public key for an existing key pair
+ */
+async function getExistingPublicKey(deviceId: string) {
+    try {
+        const privateKeyAlias = `device_${deviceId}_cert`;
+
+        const exists = await CSRModule.keyExists(privateKeyAlias);
+        if (!exists) {
+            throw new Error("Key not found");
+        }
+
+        const publicKey = await CSRModule.getPublicKey(privateKeyAlias);
+        console.log("✅ Public key retrieved");
+        return publicKey;
+    } catch (error) {
+        console.error("Error retrieving public key:", error);
+        throw error;
+    }
+}
+
+/**
+ * Complete device provisioning workflow
+ */
+async function provisionDevice(deviceInfo: {
+    deviceId: string;
+    serialNumber: string;
+    ipAddress: string;
+}) {
+    try {
+        console.log("🔧 Starting device provisioning...");
+
+        // Step 1: Generate unique alias
+        const privateKeyAlias = `pwrview_${deviceInfo.deviceId}`;
+
+        // Step 2: Check if already provisioned
+        const exists = await CSRModule.keyExists(privateKeyAlias);
+        if (exists) {
+            throw new Error("Device already provisioned. Delete existing key first.");
+        }
+
+        // Step 3: Generate CSR with hardware-backed key
+        console.log("📝 Generating CSR...");
+        const result = await CSRModule.generateCSR({
+            country: "US",
+            state: "Nevada",
+            locality: "Reno",
+            organization: "Generac",
+            organizationalUnit: "PWRview",
+            commonName: deviceInfo.deviceId,
+            serialNumber: deviceInfo.serialNumber,
+            ipAddress: deviceInfo.ipAddress,
+            curve: "secp384r1",
+            privateKeyAlias: privateKeyAlias
+        });
+
+        console.log("✅ CSR generated");
+        console.log("🔐 Hardware-backed:", result.isHardwareBacked);
+
+        // Step 4: Store alias securely
+        await securelyStoreAlias(result.privateKeyAlias);
+
+        // Step 5: Send CSR to CA
+        console.log("📤 Sending CSR to Certificate Authority...");
+        const certificate = await sendCSRToCertificateAuthority(result.csr);
+
+        // Step 6: Store certificate
+        await storeCertificate(certificate);
+
+        console.log("✅ Device provisioned successfully!");
+
+        return {
+            privateKeyAlias: result.privateKeyAlias,
+            isHardwareBacked: result.isHardwareBacked,
+            certificate: certificate
+        };
+    } catch (error) {
+        console.error("❌ Device provisioning failed:", error);
+        throw error;
+    }
+}
+
+/**
+ * List all stored key aliases (you'll need to implement storage)
+ */
+async function listStoredKeyAliases() {
+    // You would implement this using your secure storage mechanism
+    // e.g., encrypted shared preferences or secure storage library
+    const aliases = await getStoredAliases();
+
+    for (const alias of aliases) {
+        const exists = await CSRModule.keyExists(alias);
+        console.log(`${alias}: ${exists ? '✅ exists' : '❌ missing'}`);
+    }
+
+    return aliases;
+}
+
+// Helper functions (implement based on your app architecture)
+
+async function securelyStoreAlias(alias: string) {
+    // Implement using encrypted shared preferences or secure storage
+    // Example: await EncryptedStorage.setItem('privateKeyAlias', alias);
+    console.log("Storing alias securely:", alias);
+}
+
+async function sendCSRToCertificateAuthority(csr: string) {
+    // Implement your CA API call
+    console.log("Sending CSR to CA...");
+    // const response = await fetch('https://your-ca.example.com/api/csr', {
+    //   method: 'POST',
+    //   body: JSON.stringify({ csr })
+    // });
+    // return response.certificate;
+}
+
+async function storeCertificate(certificate: string) {
+    // Store the certificate for later use
+    console.log("Storing certificate...");
+}
+
+async function getStoredAliases(): Promise<string[]> {
+    // Retrieve list of aliases from your secure storage
+    return [];
 }
 
 export {
-    generateCSRExample,
-    generateMinimalCSR,
-    generateKeyPairExample,
-    generateCSRWithCustomIP,
-    generateCSRWithP256,
-    generateCSRWithP521,
-    generateP256KeyPair,
-    generateP521KeyPair
+    generateSecureCSR,
+    generateCSRForDevice,
+    checkAndGenerateCSR,
+    deleteDeviceKey,
+    renewCertificate,
+    getExistingPublicKey,
+    provisionDevice,
+    listStoredKeyAliases
 };
