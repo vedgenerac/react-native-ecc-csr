@@ -62,10 +62,17 @@ public class CSRModule extends ReactContextBaseJavaModule {
             String commonName = params.hasKey("commonName") ? params.getString("commonName") : "";
             String serialNumber = params.hasKey("serialNumber") ? params.getString("serialNumber") : "";
             String ipAddress = params.hasKey("ipAddress") ? params.getString("ipAddress") : "10.10.10.10";
+            String curve = params.hasKey("curve") ? params.getString("curve") : "secp384r1"; // P-384 default
 
-            // Generate EC P-384 key pair
+            // Validate curve
+            if (!curve.equals("secp256r1") && !curve.equals("secp384r1") && !curve.equals("secp521r1")) {
+                promise.reject("INVALID_CURVE", "Curve must be one of: secp256r1, secp384r1, secp521r1");
+                return;
+            }
+
+            // Generate EC key pair with specified curve
             KeyPairGenerator keyPairGenerator = KeyPairGenerator.getInstance("EC", "BC");
-            ECGenParameterSpec ecSpec = new ECGenParameterSpec("secp384r1"); // P-384
+            ECGenParameterSpec ecSpec = new ECGenParameterSpec(curve);
             keyPairGenerator.initialize(ecSpec);
             KeyPair keyPair = keyPairGenerator.generateKeyPair();
 
@@ -153,11 +160,19 @@ public class CSRModule extends ReactContextBaseJavaModule {
     }
 
     @ReactMethod
-    public void generateKeyPair(Promise promise) {
+    public void generateKeyPair(ReadableMap params, Promise promise) {
         try {
-            // Generate EC P-384 key pair
+            String curve = params.hasKey("curve") ? params.getString("curve") : "secp384r1"; // P-384 default
+
+            // Validate curve
+            if (!curve.equals("secp256r1") && !curve.equals("secp384r1") && !curve.equals("secp521r1")) {
+                promise.reject("INVALID_CURVE", "Curve must be one of: secp256r1, secp384r1, secp521r1");
+                return;
+            }
+
+            // Generate EC key pair with specified curve
             KeyPairGenerator keyPairGenerator = KeyPairGenerator.getInstance("EC", "BC");
-            ECGenParameterSpec ecSpec = new ECGenParameterSpec("secp384r1"); // P-384
+            ECGenParameterSpec ecSpec = new ECGenParameterSpec(curve);
             keyPairGenerator.initialize(ecSpec);
             KeyPair keyPair = keyPairGenerator.generateKeyPair();
 
