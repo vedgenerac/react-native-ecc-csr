@@ -1,24 +1,59 @@
 import { NativeModules } from 'react-native';
 
-type CurveType = 'P-256' | 'P-384' | 'P-521';
-
-interface ECCCSRModule {
-  generateCSR(
-    alias?: string,
-    curve?: CurveType,
-    cn?: string,
-    userId?: string,
-    country?: string,
-    state?: string,
-    locality?: string,
-    organization?: string,
-    organizationalUnit?: string
-  ): Promise<string>;
-
-  getPublicKey(alias?: string): Promise<string>;
-}
-
 const { CSRModule } = NativeModules;
 
-// Optional: re-export under a nicer name
-export default CSRModule as ECCCSRModule;
+export type ECCurve = 'secp256r1' | 'secp384r1' | 'secp521r1';
+
+export interface CSRParams {
+  country?: string;
+  state?: string;
+  locality?: string;
+  organization?: string;
+  organizationalUnit?: string;
+  commonName: string;
+  serialNumber?: string;
+  ipAddress?: string;
+  curve?: ECCurve; // P-256, P-384 (default), or P-521
+  privateKeyAlias: string; // REQUIRED: Android Keystore alias
+}
+
+export interface CSRResult {
+  csr: string;
+  privateKeyAlias: string; // Alias to the key in Android Keystore (NOT the key itself!)
+  publicKey: string;
+  isHardwareBacked: boolean; // Whether the key is stored in hardware
+}
+
+export interface CSRModuleInterface {
+  /**
+   * Generates a Certificate Signing Request (CSR) with hardware-backed ECC key pair
+   * The private key is stored securely in Android Keystore and NEVER exposed.
+   * 
+   * @param params - CSR parameters including privateKeyAlias for secure storage
+   * @returns Promise resolving to CSR, key alias (not the key!), and public key
+   */
+  generateCSR(params: CSRParams): Promise<CSRResult>;
+
+  /**
+   * Deletes a key from Android Keystore
+   * @param privateKeyAlias - The alias of the key to delete
+   * @returns Promise resolving to true if successful
+   */
+  deleteKey(privateKeyAlias: string): Promise<boolean>;
+
+  /**
+   * Checks if a key exists in Android Keystore
+   * @param privateKeyAlias - The alias of the key to check
+   * @returns Promise resolving to true if key exists
+   */
+  keyExists(privateKeyAlias: string): Promise<boolean>;
+
+  /**
+   * Retrieves the public key for a given alias
+   * @param privateKeyAlias - The alias of the key pair
+   * @returns Promise resolving to base64-encoded public key
+   */
+  getPublicKey(privateKeyAlias: string): Promise<string>;
+}
+
+export default CSRModule as CSRModuleInterface;

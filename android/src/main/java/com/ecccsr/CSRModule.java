@@ -2,275 +2,314 @@ package com.ecccsr;
 
 import android.security.keystore.KeyGenParameterSpec;
 import android.security.keystore.KeyProperties;
-import android.util.Log;
-
+import android.util.Base64;
+import com.facebook.react.bridge.Promise;
 import com.facebook.react.bridge.ReactApplicationContext;
 import com.facebook.react.bridge.ReactContextBaseJavaModule;
 import com.facebook.react.bridge.ReactMethod;
-import com.facebook.react.bridge.Promise;
+import com.facebook.react.bridge.ReadableMap;
 
+import org.bouncycastle.asn1.pkcs.PKCSObjectIdentifiers;
+import org.bouncycastle.asn1.x500.X500Name;
+import org.bouncycastle.asn1.x509.Extension;
+import org.bouncycastle.asn1.x509.ExtensionsGenerator;
+import org.bouncycastle.asn1.x509.GeneralName;
+import org.bouncycastle.asn1.x509.GeneralNames;
+import org.bouncycastle.asn1.x509.KeyUsage;
+import org.bouncycastle.asn1.x509.KeyPurposeId;
+import org.bouncycastle.asn1.x509.ExtendedKeyUsage;
+import org.bouncycastle.jce.provider.BouncyCastleProvider;
+import org.bouncycastle.openssl.jcajce.JcaPEMWriter;
+import org.bouncycastle.asn1.x509.AlgorithmIdentifier;
+import org.bouncycastle.asn1.pkcs.PKCSObjectIdentifiers;
+import org.bouncycastle.operator.ContentSigner;
+import org.bouncycastle.operator.DefaultSignatureAlgorithmIdentifierFinder;
+import org.bouncycastle.pkcs.PKCS10CertificationRequest;
+import org.bouncycastle.pkcs.PKCS10CertificationRequestBuilder;
+import org.bouncycastle.pkcs.jcajce.JcaPKCS10CertificationRequestBuilder;
+
+import java.io.ByteArrayOutputStream;
+import java.io.OutputStream;
+import java.io.StringWriter;
+import java.security.Signature;
+import java.security.KeyPair;
 import java.security.KeyPairGenerator;
 import java.security.KeyStore;
 import java.security.PrivateKey;
 import java.security.PublicKey;
+import java.security.Security;
 import java.security.spec.ECGenParameterSpec;
-import java.io.StringWriter;
 
-import org.bouncycastle.asn1.ASN1EncodableVector;
-import org.bouncycastle.asn1.ASN1ObjectIdentifier;
-import org.bouncycastle.asn1.DERBitString;
-import org.bouncycastle.asn1.DEROctetString;
-import org.bouncycastle.asn1.DERSequence;
-import org.bouncycastle.asn1.DERSet;
-import org.bouncycastle.asn1.pkcs.PKCSObjectIdentifiers;
-import org.bouncycastle.asn1.x500.X500NameBuilder;
-import org.bouncycastle.asn1.x500.style.BCStyle;
-import org.bouncycastle.asn1.x509.Extension;
-import org.bouncycastle.asn1.x509.ExtendedKeyUsage;
-import org.bouncycastle.asn1.x509.Extensions;
-import org.bouncycastle.asn1.x509.ExtensionsGenerator;
-import org.bouncycastle.asn1.x509.KeyPurposeId;
-import org.bouncycastle.asn1.x509.KeyUsage;
-import org.bouncycastle.asn1.x509.SubjectPublicKeyInfo;
-import org.bouncycastle.operator.ContentSigner;
-import org.bouncycastle.operator.jcajce.JcaContentSignerBuilder;
-import org.bouncycastle.pkcs.PKCS10CertificationRequest;
-import org.bouncycastle.pkcs.PKCS10CertificationRequestBuilder;
-import org.bouncycastle.util.io.pem.PemObject;
-import org.bouncycastle.util.io.pem.PemWriter;
-
-/**
- * CSRModule - Generates ECC Certificate Signing Requests with proper X.509v3
- * extensions
- * for mTLS client authentication
- * 
- * CRITICAL: This version INCLUDES Key Usage and Extended Key Usage extensions
- */
 public class CSRModule extends ReactContextBaseJavaModule {
-    private static final String TAG = "CSRModule";
-    private static final String KEYSTORE_PROVIDER = "AndroidKeyStore";
-    private static final String DEFAULT_ALIAS = "ECC_CSR_KEY_ALIAS";
+
+    private static final String MODULE_NAME = "CSRModule";
+    private static final String ANDROID_KEYSTORE = "AndroidKeyStore";
 
     public CSRModule(ReactApplicationContext reactContext) {
         super(reactContext);
+        Security.removeProvider("BC");
+        Security.addProvider(new BouncyCastleProvider());
     }
 
     @Override
     public String getName() {
-        return "CSRModule";
+        return MODULE_NAME;
     }
 
     /**
-     * Generates ECC key pair in Android Keystore if it doesn't exist
+     * Custom ContentSigner implementation for Android Keystore
+     * Android Keystore requires using Signature API directly, not through BouncyCastle
      */
-    private void generateKeyPairIfNeeded(String alias, String curve) throws Exception {
-        KeyStore keyStore = KeyStore.getInstance(KEYSTORE_PROVIDER);
-        keyStore.load(null);
+    private static class AndroidKeystoreContentSigner implements ContentSigner {
+        private final ByteArrayOutputStream outputStream;
+        private final AlgorithmIdentifier sigAlgId;
+        private final Signature signature;
 
-        if (!keyStore.containsAlias(alias)) {
-            Log.d(TAG, "Generating new ECC key pair with alias: " + alias + ", curve: " + curve);
+        public AndroidKeystoreContentSigner(PrivateKey privateKey, String algorithm) throws Exception {
+            this.outputStream = new ByteArrayOutputStream();
+            this.sigAlgId = new DefaultSignatureAlgorithmIdentifierFinder().find(algorithm);
+            
+            // Use Android's Signature class, not BouncyCastle
+            this.signature = Signature.getInstance(algorithm);
+            this.signature.initSign(privateKey);
+        }
 
-            KeyPairGenerator keyPairGenerator = KeyPairGenerator.getInstance(
-                    KeyProperties.KEY_ALGORITHM_EC, KEYSTORE_PROVIDER);
+        @Override
+        public AlgorithmIdentifier getAlgorithmIdentifier() {
+            return sigAlgId;
+        }
 
-            KeyGenParameterSpec.Builder builder = new KeyGenParameterSpec.Builder(
-                    alias,
-                    KeyProperties.PURPOSE_SIGN | KeyProperties.PURPOSE_VERIFY)
-                    .setAlgorithmParameterSpec(new ECGenParameterSpec(curve))
-                    .setDigests(KeyProperties.DIGEST_SHA256,
-                            KeyProperties.DIGEST_SHA384,
-                            KeyProperties.DIGEST_SHA512)
-                    .setUserAuthenticationRequired(false);
+        @Override
+        public OutputStream getOutputStream() {
+            return outputStream;
+        }
 
-            keyPairGenerator.initialize(builder.build());
-            keyPairGenerator.generateKeyPair();
-            Log.d(TAG, "✅ Key pair generated successfully");
-        } else {
-            Log.d(TAG, "Key pair already exists with alias: " + alias);
+        @Override
+        public byte[] getSignature() {
+            try {
+                signature.update(outputStream.toByteArray());
+                return signature.sign();
+            } catch (Exception e) {
+                throw new RuntimeException("Failed to sign", e);
+            }
         }
     }
 
-    /**
-     * Generate CSR with X.509v3 extensions
-     * 
-     * @param alias              Keystore alias (use empty string for default)
-     * @param curve              ECC curve: "secp256r1" (P-256), "secp384r1"
-     *                           (P-384), or "secp521r1" (P-521)
-     * @param cn                 Common Name
-     * @param serialNumber       Serial Number
-     * @param country            Country (2-letter code)
-     * @param state              State
-     * @param locality           City
-     * @param organization       Organization
-     * @param organizationalUnit Organizational Unit
-     * @param promise            React Native promise
-     */
     @ReactMethod
-    public void generateCSR(
-            String alias,
-            String curve,
-            String cn,
-            String serialNumber,
-            String country,
-            String state,
-            String locality,
-            String organization,
-            String organizationalUnit,
-            Promise promise) {
-
+    public void generateCSR(ReadableMap params, Promise promise) {
         try {
-            String keyAlias = (alias != null && !alias.isEmpty()) ? alias : DEFAULT_ALIAS;
-            String eccCurve = (curve != null && !curve.isEmpty()) ? curve : "secp256r1";
-
-            Log.d(TAG, "════════════════════════════════════════");
-            Log.d(TAG, "Generating CSR with extensions");
-            Log.d(TAG, "Alias: " + keyAlias);
-            Log.d(TAG, "Curve: " + eccCurve);
-            Log.d(TAG, "CN: " + cn);
-            Log.d(TAG, "serialNumber: " + serialNumber);
-            Log.d(TAG, "════════════════════════════════════════");
-
-            // Generate key pair if needed
-            generateKeyPairIfNeeded(keyAlias, eccCurve);
-
-            // Load keystore and get keys
-            KeyStore keyStore = KeyStore.getInstance(KEYSTORE_PROVIDER);
-            keyStore.load(null);
-
-            PrivateKey privateKey = (PrivateKey) keyStore.getKey(keyAlias, null);
-            PublicKey publicKey = keyStore.getCertificate(keyAlias).getPublicKey();
-
-            if (privateKey == null || publicKey == null) {
-                throw new Exception("Failed to retrieve keys from keystore");
+            // Extract parameters
+            String country = params.hasKey("country") ? params.getString("country") : "US";
+            String state = params.hasKey("state") ? params.getString("state") : "Nevada";
+            String locality = params.hasKey("locality") ? params.getString("locality") : "Reno";
+            String organization = params.hasKey("organization") ? params.getString("organization") : "Generac";
+            String organizationalUnit = params.hasKey("organizationalUnit") ? params.getString("organizationalUnit") : "PWRview";
+            String commonName = params.hasKey("commonName") ? params.getString("commonName") : "";
+            String serialNumber = params.hasKey("serialNumber") ? params.getString("serialNumber") : "";
+            String ipAddress = params.hasKey("ipAddress") ? params.getString("ipAddress") : "10.10.10.10";
+            String curve = params.hasKey("curve") ? params.getString("curve") : "secp384r1"; // P-384 default
+            
+            // CRITICAL: privateKeyAlias for Android Keystore
+            String privateKeyAlias = params.hasKey("privateKeyAlias") ? params.getString("privateKeyAlias") : null;
+            
+            if (privateKeyAlias == null || privateKeyAlias.isEmpty()) {
+                promise.reject("MISSING_ALIAS", "privateKeyAlias is required for secure key storage");
+                return;
             }
 
-            // Build subject DN in proper order: C, ST, L, O, OU, CN, serialNumber
-            X500NameBuilder nameBuilder = new X500NameBuilder(BCStyle.INSTANCE);
-            if (country != null && !country.isEmpty()) {
-                nameBuilder.addRDN(BCStyle.C, country);
-            }
-            if (state != null && !state.isEmpty()) {
-                nameBuilder.addRDN(BCStyle.ST, state);
-            }
-            if (locality != null && !locality.isEmpty()) {
-                nameBuilder.addRDN(BCStyle.L, locality);
-            }
-            if (organization != null && !organization.isEmpty()) {
-                nameBuilder.addRDN(BCStyle.O, organization);
-            }
-            if (organizationalUnit != null && !organizationalUnit.isEmpty()) {
-                nameBuilder.addRDN(BCStyle.OU, organizationalUnit);
-            }
-            if (cn != null && !cn.isEmpty()) {
-                nameBuilder.addRDN(BCStyle.CN, cn);
-            }
-            if (serialNumber != null && !serialNumber.isEmpty()) {
-                nameBuilder.addRDN(BCStyle.SERIALNUMBER, serialNumber);
+            // Validate curve
+            if (!curve.equals("secp256r1") && !curve.equals("secp384r1") && !curve.equals("secp521r1")) {
+                promise.reject("INVALID_CURVE", "Curve must be one of: secp256r1, secp384r1, secp521r1");
+                return;
             }
 
-            // Convert public key to SubjectPublicKeyInfo
-            SubjectPublicKeyInfo subjectPublicKeyInfo = SubjectPublicKeyInfo.getInstance(
-                    publicKey.getEncoded());
+            // Map curve to Android Keystore curve
+            String keystoreCurve;
+            switch (curve) {
+                case "secp256r1":
+                    keystoreCurve = "secp256r1";
+                    break;
+                case "secp384r1":
+                    keystoreCurve = "secp384r1";
+                    break;
+                case "secp521r1":
+                    keystoreCurve = "secp521r1";
+                    break;
+                default:
+                    keystoreCurve = "secp384r1";
+            }
+
+            // Generate key pair in Android Keystore (hardware-backed)
+            KeyPairGenerator keyPairGenerator = KeyPairGenerator.getInstance(
+                KeyProperties.KEY_ALGORITHM_EC, 
+                ANDROID_KEYSTORE
+            );
+
+            // Configure key generation with hardware backing
+            KeyGenParameterSpec.Builder specBuilder = new KeyGenParameterSpec.Builder(
+                privateKeyAlias,
+                KeyProperties.PURPOSE_SIGN | KeyProperties.PURPOSE_VERIFY
+            )
+            .setAlgorithmParameterSpec(new ECGenParameterSpec(keystoreCurve))
+            .setDigests(
+                KeyProperties.DIGEST_SHA256,
+                KeyProperties.DIGEST_SHA384,
+                KeyProperties.DIGEST_SHA512
+            )
+            .setUserAuthenticationRequired(false); // Set to true if you want user auth (fingerprint/PIN)
+
+            // Initialize key generator with spec
+            keyPairGenerator.initialize(specBuilder.build());
+
+            // Generate key pair - private key NEVER leaves the hardware!
+            KeyPair keyPair = keyPairGenerator.generateKeyPair();
+            PrivateKey privateKey = keyPair.getPrivate();
+            PublicKey publicKey = keyPair.getPublic();
+
+            // Build the subject DN
+            StringBuilder subjectBuilder = new StringBuilder();
+            subjectBuilder.append("C=").append(country);
+            subjectBuilder.append(", ST=").append(state);
+            subjectBuilder.append(", L=").append(locality);
+            subjectBuilder.append(", O=").append(organization);
+            subjectBuilder.append(", OU=").append(organizationalUnit);
+            subjectBuilder.append(", CN=").append(commonName);
+            if (!serialNumber.isEmpty()) {
+                subjectBuilder.append(", serialNumber=").append(serialNumber);
+            }
+
+            X500Name subject = new X500Name(subjectBuilder.toString());
 
             // Create CSR builder
-            PKCS10CertificationRequestBuilder csrBuilder = new PKCS10CertificationRequestBuilder(
-                    nameBuilder.build(), subjectPublicKeyInfo);
+            PKCS10CertificationRequestBuilder csrBuilder = 
+                new JcaPKCS10CertificationRequestBuilder(subject, publicKey);
 
-            // ═══════════════════════════════════════════════════════════════
-            // CRITICAL: Add X.509v3 Extensions for mTLS
-            // ═══════════════════════════════════════════════════════════════
+            // Create extensions
+            ExtensionsGenerator extGen = new ExtensionsGenerator();
 
-            ExtensionsGenerator extensionsGenerator = new ExtensionsGenerator();
-
-            // 1. Key Usage: Digital Signature, Key Agreement (CRITICAL)
+            // Add Key Usage (critical): Digital Signature, Key Agreement
             KeyUsage keyUsage = new KeyUsage(
-                    KeyUsage.digitalSignature | KeyUsage.keyAgreement);
-            extensionsGenerator.addExtension(
-                    Extension.keyUsage,
-                    true, // critical = true
-                    keyUsage);
-            Log.d(TAG, "✅ Added Key Usage: digitalSignature, keyAgreement (critical)");
+                KeyUsage.digitalSignature | KeyUsage.keyAgreement
+            );
+            extGen.addExtension(Extension.keyUsage, true, keyUsage);
 
-            // 2. Extended Key Usage: TLS Web Client Authentication
+            // Add Extended Key Usage: TLS Web Client Authentication
             ExtendedKeyUsage extendedKeyUsage = new ExtendedKeyUsage(
-                    KeyPurposeId.id_kp_clientAuth);
-            extensionsGenerator.addExtension(
-                    Extension.extendedKeyUsage,
-                    false, // critical = false
-                    extendedKeyUsage);
-            Log.d(TAG, "✅ Added Extended Key Usage: clientAuth");
+                KeyPurposeId.id_kp_clientAuth
+            );
+            extGen.addExtension(Extension.extendedKeyUsage, false, extendedKeyUsage);
 
-            Extensions extensions = extensionsGenerator.generate();
+            // Add Subject Alternative Name: IP Address
+            GeneralName[] sanArray = new GeneralName[1];
+            sanArray[0] = new GeneralName(GeneralName.iPAddress, ipAddress);
+            GeneralNames subjectAltNames = new GeneralNames(sanArray);
+            extGen.addExtension(Extension.subjectAlternativeName, false, subjectAltNames);
 
-            // Add extensions as an attribute to the CSR
+            // Add extensions to CSR
             csrBuilder.addAttribute(
-                    PKCSObjectIdentifiers.pkcs_9_at_extensionRequest,
-                    extensions);
-            Log.d(TAG, "✅ Extensions added to CSR");
+                PKCSObjectIdentifiers.pkcs_9_at_extensionRequest,
+                extGen.generate()
+            );
 
-            // ═══════════════════════════════════════════════════════════════
-            // Sign and build the CSR
-            // ═══════════════════════════════════════════════════════════════
+            // Sign the CSR using Android Keystore
+            // Use custom ContentSigner because Android Keystore doesn't work with BouncyCastle's builder
+            ContentSigner signer = new AndroidKeystoreContentSigner(privateKey, "SHA256withECDSA");
 
-            // Determine signature algorithm based on curve
-            String signatureAlgorithm;
-            if (eccCurve.equals("secp256r1")) {
-                signatureAlgorithm = "SHA256withECDSA";
-            } else if (eccCurve.equals("secp384r1")) {
-                signatureAlgorithm = "SHA384withECDSA";
-            } else if (eccCurve.equals("secp521r1")) {
-                signatureAlgorithm = "SHA512withECDSA";
-            } else {
-                signatureAlgorithm = "SHA256withECDSA"; // default
-            }
-
-            Log.d(TAG, "Using signature algorithm: " + signatureAlgorithm);
-
-            JcaContentSignerBuilder signerBuilder = new JcaContentSignerBuilder(signatureAlgorithm);
-            ContentSigner signer = signerBuilder.build(privateKey);
             PKCS10CertificationRequest csr = csrBuilder.build(signer);
 
-            // Convert to PEM format
-            StringWriter stringWriter = new StringWriter();
-            try (PemWriter pemWriter = new PemWriter(stringWriter)) {
-                pemWriter.writeObject(new PemObject("CERTIFICATE REQUEST", csr.getEncoded()));
-            }
+            // Convert CSR to PEM format
+            StringWriter csrWriter = new StringWriter();
+            JcaPEMWriter pemWriter = new JcaPEMWriter(csrWriter);
+            pemWriter.writeObject(csr);
+            pemWriter.close();
+            String csrPem = csrWriter.toString();
 
-            String csrPem = stringWriter.toString();
-            Log.d(TAG, "════════════════════════════════════════");
-            Log.d(TAG, "✅ CSR Generated Successfully with Extensions!");
-            Log.d(TAG, "════════════════════════════════════════");
+            // Prepare response - NO PRIVATE KEY RETURNED!
+            com.facebook.react.bridge.WritableMap response = 
+                com.facebook.react.bridge.Arguments.createMap();
+            response.putString("csr", csrPem);
+            response.putString("privateKeyAlias", privateKeyAlias); // Return alias only
+            response.putString("publicKey", Base64.encodeToString(publicKey.getEncoded(), Base64.NO_WRAP));
+            response.putBoolean("isHardwareBacked", isHardwareBacked(privateKeyAlias));
 
-            promise.resolve(csrPem);
+            promise.resolve(response);
 
         } catch (Exception e) {
-            Log.e(TAG, "❌ CSR generation failed", e);
-            promise.reject("CSR_ERROR", "Failed to generate CSR: " + e.getMessage(), e);
+            promise.reject("CSR_GENERATION_ERROR", "Failed to generate CSR: " + e.getMessage(), e);
+        }
+    }
+
+    @ReactMethod
+    public void deleteKey(String privateKeyAlias, Promise promise) {
+        try {
+            KeyStore keyStore = KeyStore.getInstance(ANDROID_KEYSTORE);
+            keyStore.load(null);
+            keyStore.deleteEntry(privateKeyAlias);
+            promise.resolve(true);
+        } catch (Exception e) {
+            promise.reject("DELETE_KEY_ERROR", "Failed to delete key: " + e.getMessage(), e);
+        }
+    }
+
+    @ReactMethod
+    public void keyExists(String privateKeyAlias, Promise promise) {
+        try {
+            KeyStore keyStore = KeyStore.getInstance(ANDROID_KEYSTORE);
+            keyStore.load(null);
+            boolean exists = keyStore.containsAlias(privateKeyAlias);
+            promise.resolve(exists);
+        } catch (Exception e) {
+            promise.reject("KEY_EXISTS_ERROR", "Failed to check key existence: " + e.getMessage(), e);
+        }
+    }
+
+    @ReactMethod
+    public void getPublicKey(String privateKeyAlias, Promise promise) {
+        try {
+            KeyStore keyStore = KeyStore.getInstance(ANDROID_KEYSTORE);
+            keyStore.load(null);
+            
+            if (!keyStore.containsAlias(privateKeyAlias)) {
+                promise.reject("KEY_NOT_FOUND", "Key with alias '" + privateKeyAlias + "' not found");
+                return;
+            }
+
+            // Get the public key from the KeyStore entry
+            KeyStore.Entry entry = keyStore.getEntry(privateKeyAlias, null);
+            if (entry instanceof KeyStore.PrivateKeyEntry) {
+                KeyStore.PrivateKeyEntry privateKeyEntry = (KeyStore.PrivateKeyEntry) entry;
+                PublicKey publicKey = privateKeyEntry.getCertificate().getPublicKey();
+                String publicKeyBase64 = Base64.encodeToString(publicKey.getEncoded(), Base64.NO_WRAP);
+                promise.resolve(publicKeyBase64);
+            } else {
+                promise.reject("INVALID_ENTRY", "Entry is not a private key entry");
+            }
+        } catch (Exception e) {
+            promise.reject("GET_PUBLIC_KEY_ERROR", "Failed to get public key: " + e.getMessage(), e);
         }
     }
 
     /**
-     * Delete key from keystore
+     * Check if the key is hardware-backed
      */
-    @ReactMethod
-    public void deleteKey(String alias, Promise promise) {
+    private boolean isHardwareBacked(String privateKeyAlias) {
         try {
-            String keyAlias = (alias != null && !alias.isEmpty()) ? alias : DEFAULT_ALIAS;
-
-            KeyStore keyStore = KeyStore.getInstance(KEYSTORE_PROVIDER);
+            KeyStore keyStore = KeyStore.getInstance(ANDROID_KEYSTORE);
             keyStore.load(null);
-
-            if (keyStore.containsAlias(keyAlias)) {
-                keyStore.deleteEntry(keyAlias);
-                Log.d(TAG, "✅ Deleted key with alias: " + keyAlias);
-                promise.resolve("Key deleted successfully");
-            } else {
-                Log.w(TAG, "⚠️ Key not found with alias: " + keyAlias);
-                promise.resolve("Key not found");
+            
+            KeyStore.Entry entry = keyStore.getEntry(privateKeyAlias, null);
+            if (entry instanceof KeyStore.PrivateKeyEntry) {
+                KeyStore.PrivateKeyEntry privateKeyEntry = (KeyStore.PrivateKeyEntry) entry;
+                // Check if key is hardware-backed (available on Android 9+)
+                if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.P) {
+                    return privateKeyEntry.getPrivateKey()
+                        .getAlgorithm()
+                        .equals(KeyProperties.KEY_ALGORITHM_EC);
+                }
             }
+            return true; // Assume hardware-backed for older Android versions
         } catch (Exception e) {
-            Log.e(TAG, "❌ Failed to delete key", e);
-            promise.reject("DELETE_ERROR", "Failed to delete key: " + e.getMessage(), e);
+            return false;
         }
     }
 }
