@@ -11,24 +11,26 @@
 
 @implementation EccCsrGenerator
 
-RCT_EXPORT_MODULE()
+// Export with same name as your existing Android module
+RCT_EXPORT_MODULE(CSRModule)
 
 // Export the generateCSR method to JavaScript
-RCT_EXPORT_METHOD(generateCSR:(NSDictionary *)options
+RCT_EXPORT_METHOD(generateCSR:(NSDictionary *)params
                   resolver:(RCTPromiseResolveBlock)resolve
                   rejecter:(RCTPromiseRejectBlock)reject)
 {
     @try {
-        // Extract parameters from options
-        NSString *commonName = options[@"commonName"] ?: @"";
-        NSString *serialNumber = options[@"serialNumber"] ?: @"";
-        NSString *country = options[@"country"] ?: @"";
-        NSString *state = options[@"state"] ?: @"";
-        NSString *locality = options[@"locality"] ?: @"";
-        NSString *organization = options[@"organization"] ?: @"";
-        NSString *organizationalUnit = options[@"organizationalUnit"] ?: @"";
-        NSString *ipAddress = options[@"ipAddress"] ?: @"";
-        NSString *curve = options[@"curve"] ?: @"P-384";
+        // Extract parameters from params
+        NSString *commonName = params[@"commonName"] ?: @"";
+        NSString *serialNumber = params[@"serialNumber"] ?: @"";
+        NSString *country = params[@"country"] ?: @"";
+        NSString *state = params[@"state"] ?: @"";
+        NSString *locality = params[@"locality"] ?: @"";
+        NSString *organization = params[@"organization"] ?: @"";
+        NSString *organizationalUnit = params[@"organizationalUnit"] ?: @"";
+        NSString *ipAddress = params[@"ipAddress"] ?: @"";
+        NSString *curve = params[@"curve"] ?: @"secp384r1";  // Default to secp384r1
+        NSString *privateKeyAlias = params[@"privateKeyAlias"];
         
         // Validate required parameters
         if (commonName.length == 0) {
@@ -36,9 +38,19 @@ RCT_EXPORT_METHOD(generateCSR:(NSDictionary *)options
             return;
         }
         
-        // Generate ECC key pair
+        if (!privateKeyAlias || privateKeyAlias.length == 0) {
+            reject(@"INVALID_PARAM", @"privateKeyAlias is required", nil);
+            return;
+        }
+        
+        // Map curve names from secp* to P-* format
+        NSString *normalizedCurve = [self normalizeCurveName:curve];
+        
+        // Generate ECC key pair with the privateKeyAlias as tag
         NSError *error = nil;
-        NSDictionary *keyPair = [self generateECKeyPairForCurve:curve error:&error];
+        NSDictionary *keyPair = [self generateECKeyPairForCurve:normalizedCurve 
+                                                        withAlias:privateKeyAlias 
+                                                            error:&error];
         if (error) {
             reject(@"KEY_GENERATION_ERROR", error.localizedDescription, error);
             return;
@@ -66,7 +78,7 @@ RCT_EXPORT_METHOD(generateCSR:(NSDictionary *)options
         }
                                           publicKey:publicKey
                                          privateKey:privateKey
-                                              curve:curve
+                                              curve:normalizedCurve
                                           ipAddress:ipAddress
                                               error:&error];
         
@@ -79,10 +91,15 @@ RCT_EXPORT_METHOD(generateCSR:(NSDictionary *)options
         NSString *csrPEM = [self convertToPEM:csrData label:@"CERTIFICATE REQUEST"];
         NSString *publicKeyPEM = [self convertToPEM:publicKeyData label:@"PUBLIC KEY"];
         
-        // Return result
+        // Check if hardware-backed (Secure Enclave)
+        BOOL isHardwareBacked = [self isKeyHardwareBacked:privateKey];
+        
+        // Return result matching Android API
         resolve(@{
             @"csr": csrPEM,
-            @"publicKey": publicKeyPEM
+            @"privateKeyAlias": privateKeyAlias,  // Return the alias, not the key
+            @"publicKey": publicKeyPEM,
+            @"isHardwareBacked": @(isHardwareBacked)
         });
         
     } @catch (NSException *exception) {
@@ -90,9 +107,157 @@ RCT_EXPORT_METHOD(generateCSR:(NSDictionary *)options
     }
 }
 
+// Additional methods to match Android API
+
+RCT_EXPORT_METHOD(deleteKey:(NSString *)privateKeyAlias
+                  resolver:(RCTPromiseResolveBlock)resolve
+                  rejecter:(RCTPromiseRejectBlock)reject)
+{
+    @try {
+        BOOL success = [self deleteKeyWithAlias:privateKeyAlias];
+        resolve(@(success));
+    } @catch (NSException *exception) {
+        reject(@"DELETE_KEY_ERROR", exception.reason, nil);
+    }
+}
+
+RCT_EXPORT_METHOD(keyExists:(NSString *)privateKeyAlias
+                  resolver:(RCTPromiseResolveBlock)resolve
+                  rejecter:(RCTPromiseRejectBlock)reject)
+{
+    @try {
+        BOOL exists = [self keyExistsWithAlias:privateKeyAlias];
+        resolve(@(exists));
+    } @catch (NSException *exception) {
+        reject(@"KEY_EXISTS_ERROR", exception.reason, nil);
+    }
+}
+
+RCT_EXPORT_METHOD(getPublicKey:(NSString *)privateKeyAlias
+                  resolver:(RCTPromiseResolveBlock)resolve
+                  rejecter:(RCTPromiseRejectBlock)reject)
+{
+    @try {
+        NSError *error = nil;
+        NSString *publicKeyPEM = [self getPublicKeyForAlias:privateKeyAlias error:&error];
+        
+        if (error) {
+            reject(@"GET_PUBLIC_KEY_ERROR", error.localizedDescription, error);
+            return;
+        }
+        
+        resolve(publicKeyPEM);
+    } @catch (NSException *exception) {
+        reject(@"GET_PUBLIC_KEY_ERROR", exception.reason, nil);
+    }
+}
+
+#pragma mark - Helper Methods
+
+- (NSString *)normalizeCurveName:(NSString *)curveName {
+    // Map secp* names to P-* format
+    if ([curveName isEqualToString:@"secp256r1"]) {
+        return @"P-256";
+    } else if ([curveName isEqualToString:@"secp384r1"]) {
+        return @"P-384";
+    } else if ([curveName isEqualToString:@"secp521r1"]) {
+        return @"P-521";
+    }
+    // Default to P-384 if unknown
+    return @"P-384";
+}
+
+- (BOOL)isKeyHardwareBacked:(SecKeyRef)key {
+    // Check if key is in Secure Enclave
+    NSDictionary *attributes = (__bridge_transfer NSDictionary *)SecKeyCopyAttributes(key);
+    NSString *tokenID = attributes[(id)kSecAttrTokenID];
+    
+    return [tokenID isEqualToString:(id)kSecAttrTokenIDSecureEnclave];
+}
+
+- (BOOL)deleteKeyWithAlias:(NSString *)alias {
+    NSData *tag = [alias dataUsingEncoding:NSUTF8StringEncoding];
+    
+    NSDictionary *query = @{
+        (id)kSecClass: (id)kSecClassKey,
+        (id)kSecAttrApplicationTag: tag,
+        (id)kSecAttrKeyType: (id)kSecAttrKeyTypeECSECPrimeRandom,
+    };
+    
+    OSStatus status = SecItemDelete((__bridge CFDictionaryRef)query);
+    return status == errSecSuccess || status == errSecItemNotFound;
+}
+
+- (BOOL)keyExistsWithAlias:(NSString *)alias {
+    NSData *tag = [alias dataUsingEncoding:NSUTF8StringEncoding];
+    
+    NSDictionary *query = @{
+        (id)kSecClass: (id)kSecClassKey,
+        (id)kSecAttrApplicationTag: tag,
+        (id)kSecAttrKeyType: (id)kSecAttrKeyTypeECSECPrimeRandom,
+        (id)kSecReturnRef: @YES,
+    };
+    
+    CFTypeRef result = NULL;
+    OSStatus status = SecItemCopyMatching((__bridge CFDictionaryRef)query, &result);
+    
+    if (result) {
+        CFRelease(result);
+    }
+    
+    return status == errSecSuccess;
+}
+
+- (NSString *)getPublicKeyForAlias:(NSString *)alias error:(NSError **)error {
+    NSData *tag = [alias dataUsingEncoding:NSUTF8StringEncoding];
+    
+    NSDictionary *query = @{
+        (id)kSecClass: (id)kSecClassKey,
+        (id)kSecAttrApplicationTag: tag,
+        (id)kSecAttrKeyType: (id)kSecAttrKeyTypeECSECPrimeRandom,
+        (id)kSecReturnRef: @YES,
+    };
+    
+    CFTypeRef result = NULL;
+    OSStatus status = SecItemCopyMatching((__bridge CFDictionaryRef)query, &result);
+    
+    if (status != errSecSuccess) {
+        if (error) {
+            *error = [NSError errorWithDomain:@"CSRModule" 
+                                         code:status 
+                                     userInfo:@{NSLocalizedDescriptionKey: @"Key not found"}];
+        }
+        return nil;
+    }
+    
+    SecKeyRef privateKey = (SecKeyRef)result;
+    SecKeyRef publicKey = SecKeyCopyPublicKey(privateKey);
+    CFRelease(result);
+    
+    if (!publicKey) {
+        if (error) {
+            *error = [NSError errorWithDomain:@"CSRModule" 
+                                         code:-1 
+                                     userInfo:@{NSLocalizedDescriptionKey: @"Could not extract public key"}];
+        }
+        return nil;
+    }
+    
+    NSData *publicKeyData = [self exportPublicKey:publicKey error:error];
+    CFRelease(publicKey);
+    
+    if (!publicKeyData) {
+        return nil;
+    }
+    
+    return [self convertToPEM:publicKeyData label:@"PUBLIC KEY"];
+}
+
 #pragma mark - Key Generation
 
-- (NSDictionary *)generateECKeyPairForCurve:(NSString *)curveName error:(NSError **)error {
+- (NSDictionary *)generateECKeyPairForCurve:(NSString *)curveName 
+                                  withAlias:(NSString *)alias 
+                                      error:(NSError **)error {
     // Map curve names to key sizes
     int keySize = 384; // Default P-384
     if ([curveName isEqualToString:@"P-256"]) {
@@ -101,16 +266,15 @@ RCT_EXPORT_METHOD(generateCSR:(NSDictionary *)options
         keySize = 521;
     }
     
-    // Create unique tag for this key pair
-    NSString *tag = [NSString stringWithFormat:@"com.ecccsrgen.keypair.%@", [[NSUUID UUID] UUIDString]];
-    NSData *tagData = [tag dataUsingEncoding:NSUTF8StringEncoding];
+    // Use the alias as the keychain tag
+    NSData *tagData = [alias dataUsingEncoding:NSUTF8StringEncoding];
     
-    // Key generation parameters
+    // Key generation parameters - make keys persistent
     NSDictionary *parameters = @{
         (id)kSecAttrKeyType: (id)kSecAttrKeyTypeECSECPrimeRandom,
         (id)kSecAttrKeySizeInBits: @(keySize),
         (id)kSecPrivateKeyAttrs: @{
-            (id)kSecAttrIsPermanent: @NO,
+            (id)kSecAttrIsPermanent: @YES,  // Store permanently in keychain
             (id)kSecAttrApplicationTag: tagData,
         }
     };
