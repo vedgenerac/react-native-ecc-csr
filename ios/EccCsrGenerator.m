@@ -468,9 +468,16 @@ RCT_EXPORT_METHOD(getPublicKey:(NSString *)privateKeyAlias
     // Get OID for attribute
     NSData *oid = [self getOIDForAttribute:key];
     
-    // ⭐️ CRITICAL FIX: Use PrintableString (0x13) instead of UTF8String (0x0C)
-    // This matches Android's encoding and fixes backend rejection
-    NSData *stringValue = [self encodePrintableString:value];
+    // ⭐️ CRITICAL FIX: Match Android's encoding exactly
+    // Country (C) and serialNumber use PrintableString (0x13)
+    // All other fields use UTF8String (0x0C)
+    NSData *stringValue;
+    
+    if ([key isEqualToString:@"C"] || [key isEqualToString:@"serialNumber"]) {
+        stringValue = [self encodePrintableString:value];
+    } else {
+        stringValue = [self encodeUTF8String:value];
+    }
     
     // AttributeTypeAndValue = SEQUENCE { type OID, value ANY }
     NSMutableData *atav = [NSMutableData data];
@@ -746,8 +753,9 @@ RCT_EXPORT_METHOD(getPublicKey:(NSString *)privateKeyAlias
     return data;
 }
 
-// ⭐️ CRITICAL FIX: New method to encode PrintableString instead of UTF8String
-// This matches Android's encoding (tag 0x13) and fixes the backend rejection
+// ⭐️ CRITICAL FIX: Match Android's exact encoding
+// Country (C) and serialNumber use PrintableString (0x13)
+// All other DN fields (ST, L, O, OU, CN) use UTF8String (0x0C)
 - (NSData *)encodePrintableString:(NSString *)string {
     // Convert string to ASCII data (PrintableString uses ASCII subset)
     NSData *stringData = [string dataUsingEncoding:NSASCIIStringEncoding];
