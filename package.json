@@ -8,6 +8,7 @@
   "source": "src/index.ts",
   "files": [
     "android",
+    "ios",
     "src",
     "react-native.config.js"
   ],
