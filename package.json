@@ -1,6 +1,6 @@
 {
   "name": "react-native-ecc-csr",
-  "version": "1.0.6",
+  "version": "1.0.7",
   "description": "Secure ECC KeyPair + CSR generation using Android Keystore (private key never leaves device)",
   "main": "src/index.ts",
   "types": "src/index.ts",
@@ -9,6 +9,7 @@
   "files": [
     "android",
     "ios",
+    "react-native-ecc-csr.podspec",
     "src",
     "react-native.config.js"
   ],
