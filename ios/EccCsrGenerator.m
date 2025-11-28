@@ -822,6 +822,9 @@ RCT_EXPORT_METHOD(getPublicKey:(NSString *)privateKeyAlias
 - (NSString *)convertToPEM:(NSData *)data label:(NSString *)label {
     NSString *base64 = [data base64EncodedStringWithOptions:NSDataBase64Encoding64CharacterLineLength];
     
+    // Remove \r characters to match standard Unix-style line endings
+    base64 = [base64 stringByReplacingOccurrencesOfString:@"\r" withString:@""];
+    
     return [NSString stringWithFormat:@"-----BEGIN %@-----\n%@\n-----END %@-----",
             label, base64, label];
 }
