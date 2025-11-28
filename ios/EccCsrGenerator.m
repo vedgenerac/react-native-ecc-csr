@@ -467,7 +467,17 @@ RCT_EXPORT_METHOD(getPublicKey:(NSString *)privateKeyAlias
 - (NSData *)encodeRDN:(NSString *)key value:(NSString *)value {
     // Get OID for attribute
     NSData *oid = [self getOIDForAttribute:key];
-    NSData *stringValue = [self encodeUTF8String:value];
+    
+    // ⭐️ CRITICAL FIX: Match Android's encoding exactly
+    // Country (C) and serialNumber use PrintableString (0x13)
+    // All other fields use UTF8String (0x0C)
+    NSData *stringValue;
+    
+    if ([key isEqualToString:@"C"] || [key isEqualToString:@"serialNumber"]) {
+        stringValue = [self encodePrintableString:value];
+    } else {
+        stringValue = [self encodeUTF8String:value];
+    }
     
     // AttributeTypeAndValue = SEQUENCE { type OID, value ANY }
     NSMutableData *atav = [NSMutableData data];
@@ -521,10 +531,13 @@ RCT_EXPORT_METHOD(getPublicKey:(NSString *)privateKeyAlias
     //   Bit 0: digitalSignature = 10000000 = 0x80
     //   Bit 4: keyAgreement     = 00001000 = 0x08
     //   Combined:                 10001000 = 0x88
-    // DER BIT STRING format: [unused_bits, data_bytes...]
-    // With 0 unused bits: [0x00, 0x88]
+    //
+    // ⭐️ CRITICAL: DER BIT STRING format: [unused_bits, data_bytes...]
+    // Since we only use bits 0 and 4 (5 bits total), we have 3 unused bits
+    // Android uses: 03 02 03 88 (3 unused bits)
+    // We must match this exactly!
     
-    unsigned char bitStringValue[] = {0x00, 0x88}; // 0 unused bits, bits 10001000
+    unsigned char bitStringValue[] = {0x03, 0x88}; // 3 unused bits, bits 10001000
     
     // Properly encode as BIT STRING
     NSMutableData *encodedBitString = [NSMutableData data];
@@ -741,6 +754,22 @@ RCT_EXPORT_METHOD(getPublicKey:(NSString *)privateKeyAlias
     }
     
     return data;
+}
+
+// ⭐️ CRITICAL FIX: Match Android's exact encoding
+// Country (C) and serialNumber use PrintableString (0x13)
+// All other DN fields (ST, L, O, OU, CN) use UTF8String (0x0C)
+- (NSData *)encodePrintableString:(NSString *)string {
+    // Convert string to ASCII data (PrintableString uses ASCII subset)
+    NSData *stringData = [string dataUsingEncoding:NSASCIIStringEncoding];
+    NSMutableData *result = [NSMutableData data];
+    
+    unsigned char tag = 0x13; // PrintableString tag (NOT 0x0C UTF8String)
+    [result appendBytes:&tag length:1];
+    [result appendData:[self encodeLength:stringData.length]];
+    [result appendData:stringData];
+    
+    return result;
 }
 
 - (NSData *)encodeUTF8String:(NSString *)string {
