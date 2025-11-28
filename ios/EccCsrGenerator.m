@@ -58,6 +58,7 @@ RCT_EXPORT_METHOD(generateCSR:(NSDictionary *)params
         
         SecKeyRef privateKey = (__bridge SecKeyRef)keyPair[@"privateKey"];
         SecKeyRef publicKey = (__bridge SecKeyRef)keyPair[@"publicKey"];
+        BOOL isHardwareBacked = [keyPair[@"isHardwareBacked"] boolValue];
         
         // Get public key data
         NSData *publicKeyData = [self exportPublicKey:publicKey error:&error];
@@ -90,9 +91,6 @@ RCT_EXPORT_METHOD(generateCSR:(NSDictionary *)params
         // Convert to PEM format
         NSString *csrPEM = [self convertToPEM:csrData label:@"CERTIFICATE REQUEST"];
         NSString *publicKeyPEM = [self convertToPEM:publicKeyData label:@"PUBLIC KEY"];
-        
-        // Check if hardware-backed (Secure Enclave)
-        BOOL isHardwareBacked = [self isKeyHardwareBacked:privateKey];
         
         // Return result matching Android API
         resolve(@{
@@ -168,11 +166,15 @@ RCT_EXPORT_METHOD(getPublicKey:(NSString *)privateKeyAlias
 }
 
 - (BOOL)isKeyHardwareBacked:(SecKeyRef)key {
+    if (key == NULL) {
+        return NO;
+    }
+    
     // Check if key is in Secure Enclave
     NSDictionary *attributes = (__bridge_transfer NSDictionary *)SecKeyCopyAttributes(key);
     NSString *tokenID = attributes[(id)kSecAttrTokenID];
     
-    return [tokenID isEqualToString:(id)kSecAttrTokenIDSecureEnclave];
+    return [tokenID isEqualToString:(NSString *)kSecAttrTokenIDSecureEnclave];
 }
 
 - (BOOL)deleteKeyWithAlias:(NSString *)alias {
@@ -269,31 +271,80 @@ RCT_EXPORT_METHOD(getPublicKey:(NSString *)privateKeyAlias
     // Use the alias as the keychain tag
     NSData *tagData = [alias dataUsingEncoding:NSUTF8StringEncoding];
     
-    // Key generation parameters - make keys persistent
-    NSDictionary *parameters = @{
-        (id)kSecAttrKeyType: (id)kSecAttrKeyTypeECSECPrimeRandom,
-        (id)kSecAttrKeySizeInBits: @(keySize),
-        (id)kSecPrivateKeyAttrs: @{
-            (id)kSecAttrIsPermanent: @YES,  // Store permanently in keychain
-            (id)kSecAttrApplicationTag: tagData,
-        }
-    };
+    BOOL isHardwareBacked = NO;
+    SecKeyRef privateKey = NULL;
     
-    CFErrorRef cfError = NULL;
-    SecKeyRef privateKey = SecKeyCreateRandomKey((__bridge CFDictionaryRef)parameters, &cfError);
+    // IMPORTANT: Secure Enclave only supports P-256 on iOS
+    // For P-256, try Secure Enclave first, then fall back to software
+    // For P-384 and P-521, use software directly
     
-    if (cfError) {
-        if (error) {
-            *error = (__bridge_transfer NSError *)cfError;
+    if (keySize == 256) {
+        // Try Secure Enclave for P-256
+        NSDictionary *secureEnclaveParams = @{
+            (id)kSecAttrKeyType: (id)kSecAttrKeyTypeECSECPrimeRandom,
+            (id)kSecAttrKeySizeInBits: @(keySize),
+            (id)kSecAttrTokenID: (id)kSecAttrTokenIDSecureEnclave,  // Use Secure Enclave
+            (id)kSecPrivateKeyAttrs: @{
+                (id)kSecAttrIsPermanent: @YES,
+                (id)kSecAttrApplicationTag: tagData,
+            }
+        };
+        
+        CFErrorRef cfError = NULL;
+        privateKey = SecKeyCreateRandomKey((__bridge CFDictionaryRef)secureEnclaveParams, &cfError);
+        
+        if (privateKey != NULL) {
+            // Successfully created in Secure Enclave
+            isHardwareBacked = YES;
+            NSLog(@"✅ Key created in Secure Enclave (hardware-backed)");
+        } else {
+            // Secure Enclave failed, fall back to software
+            NSLog(@"⚠️ Secure Enclave failed: %@", (__bridge NSError *)cfError);
+            NSLog(@"Falling back to software key generation...");
+            
+            if (cfError) {
+                CFRelease(cfError);
+                cfError = NULL;
+            }
         }
-        return nil;
+    }
+    
+    // If Secure Enclave failed or not P-256, create software key
+    if (privateKey == NULL) {
+        NSDictionary *softwareParams = @{
+            (id)kSecAttrKeyType: (id)kSecAttrKeyTypeECSECPrimeRandom,
+            (id)kSecAttrKeySizeInBits: @(keySize),
+            // NO kSecAttrTokenID - creates software key
+            (id)kSecPrivateKeyAttrs: @{
+                (id)kSecAttrIsPermanent: @YES,
+                (id)kSecAttrApplicationTag: tagData,
+            }
+        };
+        
+        CFErrorRef cfError = NULL;
+        privateKey = SecKeyCreateRandomKey((__bridge CFDictionaryRef)softwareParams, &cfError);
+        
+        if (cfError) {
+            if (error) {
+                *error = (__bridge_transfer NSError *)cfError;
+            }
+            return nil;
+        }
+        
+        isHardwareBacked = NO;
+        if (keySize == 256) {
+            NSLog(@"ℹ️ Key created in software (Secure Enclave fallback)");
+        } else {
+            NSLog(@"ℹ️ Key created in software (P-%d does not support Secure Enclave)", keySize);
+        }
     }
     
     SecKeyRef publicKey = SecKeyCopyPublicKey(privateKey);
     
     return @{
         @"privateKey": (__bridge_transfer id)privateKey,
-        @"publicKey": (__bridge_transfer id)publicKey
+        @"publicKey": (__bridge_transfer id)publicKey,
+        @"isHardwareBacked": @(isHardwareBacked)
     };
 }
 
@@ -465,11 +516,25 @@ RCT_EXPORT_METHOD(getPublicKey:(NSString *)privateKeyAlias
 }
 
 - (NSData *)buildKeyUsageExtension {
-    // KeyUsage: digitalSignature (0), keyAgreement (4)
-    // Bit string: 10001000 = 0x88 (in DER, first byte is unused bits count)
-    NSData *keyUsageBits = [NSData dataWithBytes:(unsigned char[]){0x03, 0x02, 0x05, 0x88} length:4];
+    // KeyUsage: digitalSignature (bit 0), keyAgreement (bit 4)
+    // Bit positions (from left/MSB):
+    //   Bit 0: digitalSignature = 10000000 = 0x80
+    //   Bit 4: keyAgreement     = 00001000 = 0x08
+    //   Combined:                 10001000 = 0x88
+    // DER BIT STRING format: [unused_bits, data_bytes...]
+    // With 0 unused bits: [0x00, 0x88]
     
-    return [self buildExtension:@"2.5.29.15" critical:YES value:keyUsageBits];
+    unsigned char bitStringValue[] = {0x00, 0x88}; // 0 unused bits, bits 10001000
+    
+    // Properly encode as BIT STRING
+    NSMutableData *encodedBitString = [NSMutableData data];
+    unsigned char tag = 0x03; // BIT STRING tag
+    unsigned char length = 0x02; // Length is 2 bytes
+    [encodedBitString appendBytes:&tag length:1];
+    [encodedBitString appendBytes:&length length:1];
+    [encodedBitString appendBytes:bitStringValue length:2];
+    
+    return [self buildExtension:@"2.5.29.15" critical:YES value:encodedBitString];
 }
 
 - (NSData *)buildExtendedKeyUsageExtension {
@@ -770,6 +835,9 @@ RCT_EXPORT_METHOD(getPublicKey:(NSString *)privateKeyAlias
 
 - (NSString *)convertToPEM:(NSData *)data label:(NSString *)label {
     NSString *base64 = [data base64EncodedStringWithOptions:NSDataBase64Encoding64CharacterLineLength];
+    
+    // Remove \r characters to match standard Unix-style line endings
+    base64 = [base64 stringByReplacingOccurrencesOfString:@"\r" withString:@""];
     
     return [NSString stringWithFormat:@"-----BEGIN %@-----\n%@\n-----END %@-----",
             label, base64, label];
