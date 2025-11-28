@@ -519,15 +519,10 @@ RCT_EXPORT_METHOD(getPublicKey:(NSString *)privateKeyAlias
     // KeyUsage: digitalSignature (bit 0), keyAgreement (bit 4)
     // Bits:     1 0 0 0 1 0 0 0 = 0x88
     // In DER BIT STRING: first byte is number of unused bits (5 in this case)
-    // We need 2 bytes: 0x88 for the bits, but need to shift for 5 unused bits
-    // Actual encoding: 10001000 00000000 with 5 unused bits
-    // This equals: 0x88 0x00 with 5 unused bits
     
     unsigned char bitStringValue[] = {0x05, 0x88}; // 5 unused bits, then 10001000
-    NSData *keyUsageBitString = [NSData dataWithLength:2];
-    [(NSMutableData *)keyUsageBitString setData:[NSData dataWithBytes:bitStringValue length:2]];
     
-    // Properly encode as BIT STRING (don't double-wrap)
+    // Properly encode as BIT STRING
     NSMutableData *encodedBitString = [NSMutableData data];
     unsigned char tag = 0x03; // BIT STRING tag
     unsigned char length = 0x02; // Length is 2 bytes
