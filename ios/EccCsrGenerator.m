@@ -467,7 +467,10 @@ RCT_EXPORT_METHOD(getPublicKey:(NSString *)privateKeyAlias
 - (NSData *)encodeRDN:(NSString *)key value:(NSString *)value {
     // Get OID for attribute
     NSData *oid = [self getOIDForAttribute:key];
-    NSData *stringValue = [self encodeUTF8String:value];
+    
+    // ⭐️ CRITICAL FIX: Use PrintableString (0x13) instead of UTF8String (0x0C)
+    // This matches Android's encoding and fixes backend rejection
+    NSData *stringValue = [self encodePrintableString:value];
     
     // AttributeTypeAndValue = SEQUENCE { type OID, value ANY }
     NSMutableData *atav = [NSMutableData data];
@@ -741,6 +744,21 @@ RCT_EXPORT_METHOD(getPublicKey:(NSString *)privateKeyAlias
     }
     
     return data;
+}
+
+// ⭐️ CRITICAL FIX: New method to encode PrintableString instead of UTF8String
+// This matches Android's encoding (tag 0x13) and fixes the backend rejection
+- (NSData *)encodePrintableString:(NSString *)string {
+    // Convert string to ASCII data (PrintableString uses ASCII subset)
+    NSData *stringData = [string dataUsingEncoding:NSASCIIStringEncoding];
+    NSMutableData *result = [NSMutableData data];
+    
+    unsigned char tag = 0x13; // PrintableString tag (NOT 0x0C UTF8String)
+    [result appendBytes:&tag length:1];
+    [result appendData:[self encodeLength:stringData.length]];
+    [result appendData:stringData];
+    
+    return result;
 }
 
 - (NSData *)encodeUTF8String:(NSString *)string {
