@@ -623,16 +623,21 @@ RCT_EXPORT_METHOD(getPublicKey:(NSString *)privateKeyAlias
 
 #pragma mark - Signing
 
+// ✅ FIXED: This method was causing the "Signature did not match" error
+// The bug was double-hashing: manually hashing with SHA-256, then using
+// kSecKeyAlgorithmECDSASignatureMessageX962SHA256 which also hashes.
+// Solution: Use kSecKeyAlgorithmECDSASignatureDigestX962SHA256 which expects pre-hashed data.
 - (NSData *)signData:(NSData *)data withPrivateKey:(SecKeyRef)privateKey error:(NSError **)error {
     // Hash the data with SHA-256
     NSMutableData *hash = [NSMutableData dataWithLength:CC_SHA256_DIGEST_LENGTH];
     CC_SHA256(data.bytes, (CC_LONG)data.length, hash.mutableBytes);
     
-    // Sign the hash
+    // Sign the hash using DigestX962SHA256 which expects pre-hashed data
+    // This prevents double-hashing that was causing signature verification to fail
     CFErrorRef cfError = NULL;
     NSData *signature = (__bridge_transfer NSData *)SecKeyCreateSignature(
         privateKey,
-        kSecKeyAlgorithmECDSASignatureMessageX962SHA256,
+        kSecKeyAlgorithmECDSASignatureDigestX962SHA256,  // ✅ Changed from MessageX962SHA256 to DigestX962SHA256
         (__bridge CFDataRef)hash,
         &cfError
     );
