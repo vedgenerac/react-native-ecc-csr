@@ -58,6 +58,7 @@ RCT_EXPORT_METHOD(generateCSR:(NSDictionary *)params
         
         SecKeyRef privateKey = (__bridge SecKeyRef)keyPair[@"privateKey"];
         SecKeyRef publicKey = (__bridge SecKeyRef)keyPair[@"publicKey"];
+        BOOL isHardwareBacked = [keyPair[@"isHardwareBacked"] boolValue];
         
         // Get public key data
         NSData *publicKeyData = [self exportPublicKey:publicKey error:&error];
@@ -90,9 +91,6 @@ RCT_EXPORT_METHOD(generateCSR:(NSDictionary *)params
         // Convert to PEM format
         NSString *csrPEM = [self convertToPEM:csrData label:@"CERTIFICATE REQUEST"];
         NSString *publicKeyPEM = [self convertToPEM:publicKeyData label:@"PUBLIC KEY"];
-        
-        // Check if hardware-backed (Secure Enclave)
-        BOOL isHardwareBacked = [self isKeyHardwareBacked:privateKey];
         
         // Return result matching Android API
         resolve(@{
@@ -168,11 +166,15 @@ RCT_EXPORT_METHOD(getPublicKey:(NSString *)privateKeyAlias
 }
 
 - (BOOL)isKeyHardwareBacked:(SecKeyRef)key {
+    if (key == NULL) {
+        return NO;
+    }
+    
     // Check if key is in Secure Enclave
     NSDictionary *attributes = (__bridge_transfer NSDictionary *)SecKeyCopyAttributes(key);
     NSString *tokenID = attributes[(id)kSecAttrTokenID];
     
-    return [tokenID isEqualToString:(id)kSecAttrTokenIDSecureEnclave];
+    return [tokenID isEqualToString:(NSString *)kSecAttrTokenIDSecureEnclave];
 }
 
 - (BOOL)deleteKeyWithAlias:(NSString *)alias {
@@ -269,31 +271,80 @@ RCT_EXPORT_METHOD(getPublicKey:(NSString *)privateKeyAlias
     // Use the alias as the keychain tag
     NSData *tagData = [alias dataUsingEncoding:NSUTF8StringEncoding];
     
-    // Key generation parameters - make keys persistent
-    NSDictionary *parameters = @{
-        (id)kSecAttrKeyType: (id)kSecAttrKeyTypeECSECPrimeRandom,
-        (id)kSecAttrKeySizeInBits: @(keySize),
-        (id)kSecPrivateKeyAttrs: @{
-            (id)kSecAttrIsPermanent: @YES,  // Store permanently in keychain
-            (id)kSecAttrApplicationTag: tagData,
-        }
-    };
+    BOOL isHardwareBacked = NO;
+    SecKeyRef privateKey = NULL;
     
-    CFErrorRef cfError = NULL;
-    SecKeyRef privateKey = SecKeyCreateRandomKey((__bridge CFDictionaryRef)parameters, &cfError);
+    // IMPORTANT: Secure Enclave only supports P-256 on iOS
+    // For P-256, try Secure Enclave first, then fall back to software
+    // For P-384 and P-521, use software directly
     
-    if (cfError) {
-        if (error) {
-            *error = (__bridge_transfer NSError *)cfError;
+    if (keySize == 256) {
+        // Try Secure Enclave for P-256
+        NSDictionary *secureEnclaveParams = @{
+            (id)kSecAttrKeyType: (id)kSecAttrKeyTypeECSECPrimeRandom,
+            (id)kSecAttrKeySizeInBits: @(keySize),
+            (id)kSecAttrTokenID: (id)kSecAttrTokenIDSecureEnclave,  // Use Secure Enclave
+            (id)kSecPrivateKeyAttrs: @{
+                (id)kSecAttrIsPermanent: @YES,
+                (id)kSecAttrApplicationTag: tagData,
+            }
+        };
+        
+        CFErrorRef cfError = NULL;
+        privateKey = SecKeyCreateRandomKey((__bridge CFDictionaryRef)secureEnclaveParams, &cfError);
+        
+        if (privateKey != NULL) {
+            // Successfully created in Secure Enclave
+            isHardwareBacked = YES;
+            NSLog(@"✅ Key created in Secure Enclave (hardware-backed)");
+        } else {
+            // Secure Enclave failed, fall back to software
+            NSLog(@"⚠️ Secure Enclave failed: %@", (__bridge NSError *)cfError);
+            NSLog(@"Falling back to software key generation...");
+            
+            if (cfError) {
+                CFRelease(cfError);
+                cfError = NULL;
+            }
         }
-        return nil;
+    }
+    
+    // If Secure Enclave failed or not P-256, create software key
+    if (privateKey == NULL) {
+        NSDictionary *softwareParams = @{
+            (id)kSecAttrKeyType: (id)kSecAttrKeyTypeECSECPrimeRandom,
+            (id)kSecAttrKeySizeInBits: @(keySize),
+            // NO kSecAttrTokenID - creates software key
+            (id)kSecPrivateKeyAttrs: @{
+                (id)kSecAttrIsPermanent: @YES,
+                (id)kSecAttrApplicationTag: tagData,
+            }
+        };
+        
+        CFErrorRef cfError = NULL;
+        privateKey = SecKeyCreateRandomKey((__bridge CFDictionaryRef)softwareParams, &cfError);
+        
+        if (cfError) {
+            if (error) {
+                *error = (__bridge_transfer NSError *)cfError;
+            }
+            return nil;
+        }
+        
+        isHardwareBacked = NO;
+        if (keySize == 256) {
+            NSLog(@"ℹ️ Key created in software (Secure Enclave fallback)");
+        } else {
+            NSLog(@"ℹ️ Key created in software (P-%d does not support Secure Enclave)", keySize);
+        }
     }
     
     SecKeyRef publicKey = SecKeyCopyPublicKey(privateKey);
     
     return @{
         @"privateKey": (__bridge_transfer id)privateKey,
-        @"publicKey": (__bridge_transfer id)publicKey
+        @"publicKey": (__bridge_transfer id)publicKey,
+        @"isHardwareBacked": @(isHardwareBacked)
     };
 }
 
