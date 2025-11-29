@@ -18,13 +18,13 @@
 - (NSData *)encodeAttributeValue:(NSString *)value;
 - (NSData *)createSubjectPublicKeyInfo:(NSData *)publicKeyData keySize:(int)keySize;
 - (NSData *)createAlgorithmIdentifier:(int)keySize;
-- (NSData *)createExtensions:(NSString *)ipAddress deviceInfo:(NSString *)deviceInfo;
+- (NSData *)createExtensions:(NSString *)ipAddress phoneDeviceId:(NSString *)phoneDeviceId;
 - (NSData *)createKeyUsageExtension;
 - (NSData *)createExtendedKeyUsageExtension;
-- (NSData *)createSANExtensionWithIP:(NSString *)ipAddress deviceInfo:(NSString *)deviceInfo;
-- (NSData *)createGeneralNames:(NSString *)ipAddress deviceInfo:(NSString *)deviceInfo;
+- (NSData *)createSANExtensionWithIP:(NSString *)ipAddress phoneDeviceId:(NSString *)phoneDeviceId;
+- (NSData *)createGeneralNames:(NSString *)ipAddress phoneDeviceId:(NSString *)phoneDeviceId;
 - (NSData *)encodeIPAddress:(NSString *)ipAddress;
-- (NSData *)encodeOtherName:(NSString *)deviceInfo;
+- (NSData *)encodeOtherName:(NSString *)phoneDeviceId;
 - (NSData *)createAttributes:(NSData *)extensionsData;
 - (NSData *)createCertificationRequestInfo:(NSData *)subject spki:(NSData *)spki attributes:(NSData *)attributes;
 - (NSData *)buildFinalCSR:(NSData *)certRequestInfo signature:(NSData *)signature;
@@ -40,27 +40,31 @@
 
 RCT_EXPORT_MODULE();
 
-RCT_EXPORT_METHOD(generateCSR:(NSString *)commonName
-                  serialNumber:(NSString *)serialNumber
-                  country:(NSString *)country
-                  state:(NSString *)state
-                  locality:(NSString *)locality
-                  organization:(NSString *)organization
-                  organizationalUnit:(NSString *)organizationalUnit
-                  ipAddress:(NSString *)ipAddress
-                  deviceInfo:(NSString *)deviceInfo
-                  curve:(NSString *)curve
+RCT_EXPORT_METHOD(generateCSR:(NSDictionary *)params
                   resolver:(RCTPromiseResolveBlock)resolve
                   rejecter:(RCTPromiseRejectBlock)reject)
 {
     @try {
+        // Extract parameters from params
+        NSString *commonName = params[@"commonName"] ?: @"";
+        NSString *serialNumber = params[@"serialNumber"] ?: @"";
+        NSString *country = params[@"country"] ?: @"";
+        NSString *state = params[@"state"] ?: @"";
+        NSString *locality = params[@"locality"] ?: @"";
+        NSString *organization = params[@"organization"] ?: @"";
+        NSString *organizationalUnit = params[@"organizationalUnit"] ?: @"";
+        NSString *ipAddress = params[@"ipAddress"] ?: @"";
+        NSString *phoneDeviceId = params[@"phoneDeviceId"] ?: @"";
+        NSString *curve = params[@"curve"] ?: @"secp384r1";  // Default to secp384r1
+        NSString *privateKeyAlias = params[@"privateKeyAlias"];
+        
         // Determine key size based on curve
         int keySize;
-        if ([curve isEqualToString:@"P-256"]) {
+        if ([curve isEqualToString:@"secp256r1"] || [curve isEqualToString:@"P-256"]) {
             keySize = 256;
-        } else if ([curve isEqualToString:@"P-384"]) {
+        } else if ([curve isEqualToString:@"secp384r1"] || [curve isEqualToString:@"P-384"]) {
             keySize = 384;
-        } else if ([curve isEqualToString:@"P-521"]) {
+        } else if ([curve isEqualToString:@"secp521r1"] || [curve isEqualToString:@"P-521"]) {
             keySize = 521;
         } else {
             keySize = 384; // Default to P-384
@@ -136,7 +140,7 @@ RCT_EXPORT_METHOD(generateCSR:(NSString *)commonName
         NSData *spki = [self createSubjectPublicKeyInfo:publicKeyData keySize:keySize];
         
         // Create extensions
-        NSData *extensionsData = [self createExtensions:ipAddress deviceInfo:deviceInfo];
+        NSData *extensionsData = [self createExtensions:ipAddress phoneDeviceId:phoneDeviceId];
         
         // Create attributes (with extensions)
         NSData *attributesData = [self createAttributes:extensionsData];
@@ -380,7 +384,7 @@ RCT_EXPORT_METHOD(generateCSR:(NSString *)commonName
 
 #pragma mark - Extensions
 
-- (NSData *)createExtensions:(NSString *)ipAddress deviceInfo:(NSString *)deviceInfo {
+- (NSData *)createExtensions:(NSString *)ipAddress phoneDeviceId:(NSString *)phoneDeviceId {
     NSMutableData *extensions = [NSMutableData data];
     
     // SEQUENCE tag
@@ -396,9 +400,9 @@ RCT_EXPORT_METHOD(generateCSR:(NSString *)commonName
     NSData *extKeyUsageExt = [self createExtendedKeyUsageExtension];
     [extensionsContent appendData:extKeyUsageExt];
     
-    // Subject Alternative Name extension (if IP or deviceInfo provided)
-    if ((ipAddress && ipAddress.length > 0) || (deviceInfo && deviceInfo.length > 0)) {
-        NSData *sanExt = [self createSANExtensionWithIP:ipAddress deviceInfo:deviceInfo];
+    // Subject Alternative Name extension (if IP or phoneDeviceId provided)
+    if ((ipAddress && ipAddress.length > 0) || (phoneDeviceId && phoneDeviceId.length > 0)) {
+        NSData *sanExt = [self createSANExtensionWithIP:ipAddress phoneDeviceId:phoneDeviceId];
         [extensionsContent appendData:sanExt];
     }
     
@@ -485,7 +489,7 @@ RCT_EXPORT_METHOD(generateCSR:(NSString *)commonName
     return extension;
 }
 
-- (NSData *)createSANExtensionWithIP:(NSString *)ipAddress deviceInfo:(NSString *)deviceInfo {
+- (NSData *)createSANExtensionWithIP:(NSString *)ipAddress phoneDeviceId:(NSString *)phoneDeviceId {
     NSMutableData *extension = [NSMutableData data];
     
     // SEQUENCE tag
@@ -502,7 +506,7 @@ RCT_EXPORT_METHOD(generateCSR:(NSString *)commonName
     [extValue appendBytes:(uint8_t[]){0x04} length:1]; // OCTET STRING tag
     
     // GeneralNames SEQUENCE
-    NSData *generalNames = [self createGeneralNames:ipAddress deviceInfo:deviceInfo];
+    NSData *generalNames = [self createGeneralNames:ipAddress phoneDeviceId:phoneDeviceId];
     
     NSData *extValueLength = [self encodeDERLength:generalNames.length];
     [extValue appendData:extValueLength];
@@ -518,7 +522,7 @@ RCT_EXPORT_METHOD(generateCSR:(NSString *)commonName
     return extension;
 }
 
-- (NSData *)createGeneralNames:(NSString *)ipAddress deviceInfo:(NSString *)deviceInfo {
+- (NSData *)createGeneralNames:(NSString *)ipAddress phoneDeviceId:(NSString *)phoneDeviceId {
     NSMutableData *generalNames = [NSMutableData data];
     
     // SEQUENCE tag for GeneralNames
@@ -532,9 +536,9 @@ RCT_EXPORT_METHOD(generateCSR:(NSString *)commonName
         [generalNamesContent appendData:ipData];
     }
     
-    // Add otherName with device info if provided
-    if (deviceInfo && deviceInfo.length > 0) {
-        NSData *otherNameData = [self encodeOtherName:deviceInfo];
+    // Add otherName with phone device ID if provided
+    if (phoneDeviceId && phoneDeviceId.length > 0) {
+        NSData *otherNameData = [self encodeOtherName:phoneDeviceId];
         [generalNamesContent appendData:otherNameData];
     }
     
@@ -568,7 +572,7 @@ RCT_EXPORT_METHOD(generateCSR:(NSString *)commonName
     return ipData;
 }
 
-- (NSData *)encodeOtherName:(NSString *)deviceInfo {
+- (NSData *)encodeOtherName:(NSString *)phoneDeviceId {
     NSMutableData *otherNameData = [NSMutableData data];
     
     // [0] tag for otherName (context-specific, constructed)
@@ -591,10 +595,10 @@ RCT_EXPORT_METHOD(generateCSR:(NSString *)commonName
     
     NSMutableData *valueContent = [NSMutableData data];
     
-    // UTF8String with device info
+    // UTF8String with phone device ID
     [valueContent appendBytes:(uint8_t[]){0x0C} length:1];
     
-    NSData *stringData = [deviceInfo dataUsingEncoding:NSUTF8StringEncoding];
+    NSData *stringData = [phoneDeviceId dataUsingEncoding:NSUTF8StringEncoding];
     NSData *stringLength = [self encodeDERLength:stringData.length];
     [valueContent appendData:stringLength];
     [valueContent appendData:stringData];
