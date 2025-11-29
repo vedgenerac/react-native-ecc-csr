@@ -53,6 +53,10 @@ RCT_EXPORT_METHOD(generateCSR:(NSString *)commonName
                   resolver:(RCTPromiseResolveBlock)resolve
                   rejecter:(RCTPromiseRejectBlock)reject)
 {
+    NSLog(@"[CSR] Starting CSR generation...");
+    NSLog(@"[CSR] Parameters - CN: %@, Serial: %@, Curve: %@", commonName, serialNumber, curve);
+    NSLog(@"[CSR] DeviceInfo: %@", deviceInfo);
+    
     @try {
         // Determine key size based on curve
         int keySize;
@@ -66,6 +70,8 @@ RCT_EXPORT_METHOD(generateCSR:(NSString *)commonName
             keySize = 384; // Default to P-384
         }
         
+        NSLog(@"[CSR] Key size: %d", keySize);
+        
         // Generate ECC key pair
         NSDictionary *keyAttributes = @{
             (id)kSecAttrKeyType: (id)kSecAttrKeyTypeECSECPrimeRandom,
@@ -73,22 +79,29 @@ RCT_EXPORT_METHOD(generateCSR:(NSString *)commonName
             (id)kSecAttrIsPermanent: @NO
         };
         
+        NSLog(@"[CSR] Generating key pair...");
         CFErrorRef error = NULL;
         SecKeyRef privateKey = SecKeyCreateRandomKey((__bridge CFDictionaryRef)keyAttributes, &error);
         
         if (error != NULL) {
             NSError *nsError = (__bridge_transfer NSError *)error;
+            NSLog(@"[CSR] Key generation failed: %@", nsError);
             reject(@"KEY_GENERATION_ERROR", nsError.localizedDescription, nsError);
             return;
         }
+        
+        NSLog(@"[CSR] Key pair generated successfully");
         
         SecKeyRef publicKey = SecKeyCopyPublicKey(privateKey);
         
         if (publicKey == NULL) {
             CFRelease(privateKey);
+            NSLog(@"[CSR] Failed to extract public key");
             reject(@"PUBLIC_KEY_ERROR", @"Failed to extract public key", nil);
             return;
         }
+        
+        NSLog(@"[CSR] Public key extracted");
         
         // Build subject DN
         NSMutableString *subjectDN = [NSMutableString string];
@@ -115,11 +128,16 @@ RCT_EXPORT_METHOD(generateCSR:(NSString *)commonName
             [subjectDN appendFormat:@"/serialNumber=%@", serialNumber];
         }
         
+        NSLog(@"[CSR] Subject DN: %@", subjectDN);
+        
         // Create subject from DN string
+        NSLog(@"[CSR] Creating subject...");
         NSData *subjectData = [self createSubjectFromDN:subjectDN];
+        NSLog(@"[CSR] Subject created: %lu bytes", (unsigned long)subjectData.length);
         
         // Get public key data
         CFErrorRef pubKeyError = NULL;
+        NSLog(@"[CSR] Exporting public key...");
         NSData *publicKeyData = (NSData *)CFBridgingRelease(
             SecKeyCopyExternalRepresentation(publicKey, &pubKeyError)
         );
@@ -128,25 +146,37 @@ RCT_EXPORT_METHOD(generateCSR:(NSString *)commonName
             NSError *nsError = (__bridge_transfer NSError *)pubKeyError;
             CFRelease(privateKey);
             CFRelease(publicKey);
+            NSLog(@"[CSR] Public key export failed: %@", nsError);
             reject(@"PUBLIC_KEY_EXPORT_ERROR", nsError.localizedDescription, nsError);
             return;
         }
         
+        NSLog(@"[CSR] Public key exported: %lu bytes", (unsigned long)publicKeyData.length);
+        
         // Create Subject Public Key Info
+        NSLog(@"[CSR] Creating SPKI...");
         NSData *spki = [self createSubjectPublicKeyInfo:publicKeyData keySize:keySize];
+        NSLog(@"[CSR] SPKI created: %lu bytes", (unsigned long)spki.length);
         
         // Create extensions
+        NSLog(@"[CSR] Creating extensions...");
         NSData *extensionsData = [self createExtensions:ipAddress deviceInfo:deviceInfo];
+        NSLog(@"[CSR] Extensions created: %lu bytes", (unsigned long)extensionsData.length);
         
         // Create attributes (with extensions)
+        NSLog(@"[CSR] Creating attributes...");
         NSData *attributesData = [self createAttributes:extensionsData];
+        NSLog(@"[CSR] Attributes created: %lu bytes", (unsigned long)attributesData.length);
         
         // Create CertificationRequestInfo
+        NSLog(@"[CSR] Creating CertificationRequestInfo...");
         NSData *certRequestInfo = [self createCertificationRequestInfo:subjectData
                                                                    spki:spki
                                                              attributes:attributesData];
+        NSLog(@"[CSR] CertificationRequestInfo created: %lu bytes", (unsigned long)certRequestInfo.length);
         
         // Sign the CSR
+        NSLog(@"[CSR] Signing CSR...");
         CFErrorRef signError = NULL;
         NSData *signature = (NSData *)CFBridgingRelease(
             SecKeyCreateSignature(privateKey,
@@ -159,15 +189,22 @@ RCT_EXPORT_METHOD(generateCSR:(NSString *)commonName
             NSError *nsError = (__bridge_transfer NSError *)signError;
             CFRelease(privateKey);
             CFRelease(publicKey);
+            NSLog(@"[CSR] Signing failed: %@", nsError);
             reject(@"SIGNING_ERROR", nsError.localizedDescription, nsError);
             return;
         }
         
+        NSLog(@"[CSR] Signature created: %lu bytes", (unsigned long)signature.length);
+        
         // Build final CSR
+        NSLog(@"[CSR] Building final CSR...");
         NSData *csrData = [self buildFinalCSR:certRequestInfo signature:signature];
+        NSLog(@"[CSR] Final CSR built: %lu bytes", (unsigned long)csrData.length);
         
         // Convert to PEM
+        NSLog(@"[CSR] Converting to PEM...");
         NSString *csrPEM = [self convertToPEM:csrData];
+        NSLog(@"[CSR] PEM conversion complete");
         
         // Get public key in PEM format
         NSString *publicKeyPEM = [publicKeyData base64EncodedStringWithOptions:0];
@@ -182,9 +219,15 @@ RCT_EXPORT_METHOD(generateCSR:(NSString *)commonName
             @"publicKey": publicKeyPEM
         };
         
+        NSLog(@"[CSR] CSR generation successful!");
+        NSLog(@"[CSR] CSR Preview: %@", [csrPEM substringToIndex:MIN(100, csrPEM.length)]);
+        
         resolve(result);
         
     } @catch (NSException *exception) {
+        NSLog(@"[CSR] Exception caught: %@", exception);
+        NSLog(@"[CSR] Exception reason: %@", exception.reason);
+        NSLog(@"[CSR] Exception stack: %@", exception.callStackSymbols);
         reject(@"CSR_GENERATION_ERROR", exception.reason, nil);
     }
 }
@@ -192,6 +235,7 @@ RCT_EXPORT_METHOD(generateCSR:(NSString *)commonName
 #pragma mark - Subject DN Creation
 
 - (NSData *)createSubjectFromDN:(NSString *)dn {
+    NSLog(@"[CSR] createSubjectFromDN called with: %@", dn);
     // Parse DN string and create ASN.1 structure
     NSMutableData *subjectData = [NSMutableData data];
     
@@ -202,6 +246,7 @@ RCT_EXPORT_METHOD(generateCSR:(NSString *)commonName
     
     // Split DN by commas
     NSArray *components = [dn componentsSeparatedByString:@", "];
+    NSLog(@"[CSR] DN components count: %lu", (unsigned long)components.count);
     
     for (NSString *component in components) {
         NSArray *keyValue = [component componentsSeparatedByString:@"="];
@@ -209,6 +254,7 @@ RCT_EXPORT_METHOD(generateCSR:(NSString *)commonName
             NSString *key = [keyValue[0] stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceCharacterSet]];
             NSString *value = [keyValue[1] stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceCharacterSet]];
             
+            NSLog(@"[CSR] Processing DN component: %@ = %@", key, value);
             NSData *rdnData = [self createRDN:key value:value];
             [subjectContent appendData:rdnData];
         }
@@ -219,6 +265,7 @@ RCT_EXPORT_METHOD(generateCSR:(NSString *)commonName
     [subjectData appendData:lengthData];
     [subjectData appendData:subjectContent];
     
+    NSLog(@"[CSR] createSubjectFromDN completed: %lu bytes", (unsigned long)subjectData.length);
     return subjectData;
 }
 
@@ -311,6 +358,7 @@ RCT_EXPORT_METHOD(generateCSR:(NSString *)commonName
 #pragma mark - Subject Public Key Info
 
 - (NSData *)createSubjectPublicKeyInfo:(NSData *)publicKeyData keySize:(int)keySize {
+    NSLog(@"[CSR] createSubjectPublicKeyInfo called");
     NSMutableData *spki = [NSMutableData data];
     
     // SEQUENCE tag
@@ -341,6 +389,7 @@ RCT_EXPORT_METHOD(generateCSR:(NSString *)commonName
     [spki appendData:spkiLength];
     [spki appendData:spkiContent];
     
+    NSLog(@"[CSR] createSubjectPublicKeyInfo completed: %lu bytes", (unsigned long)spki.length);
     return spki;
 }
 
@@ -382,6 +431,7 @@ RCT_EXPORT_METHOD(generateCSR:(NSString *)commonName
 #pragma mark - Extensions
 
 - (NSData *)createExtensions:(NSString *)ipAddress deviceInfo:(NSString *)deviceInfo {
+    NSLog(@"[CSR] createExtensions called - IP: %@, DeviceInfo: %@", ipAddress, deviceInfo);
     NSMutableData *extensions = [NSMutableData data];
     
     // SEQUENCE tag
@@ -390,15 +440,18 @@ RCT_EXPORT_METHOD(generateCSR:(NSString *)commonName
     NSMutableData *extensionsContent = [NSMutableData data];
     
     // Key Usage extension
+    NSLog(@"[CSR] Creating Key Usage extension");
     NSData *keyUsageExt = [self createKeyUsageExtension];
     [extensionsContent appendData:keyUsageExt];
     
     // Extended Key Usage extension
+    NSLog(@"[CSR] Creating Extended Key Usage extension");
     NSData *extKeyUsageExt = [self createExtendedKeyUsageExtension];
     [extensionsContent appendData:extKeyUsageExt];
     
     // Subject Alternative Name extension (if IP or deviceInfo provided)
     if ((ipAddress && ipAddress.length > 0) || (deviceInfo && deviceInfo.length > 0)) {
+        NSLog(@"[CSR] Creating SAN extension");
         NSData *sanExt = [self createSANExtensionWithIP:ipAddress deviceInfo:deviceInfo];
         [extensionsContent appendData:sanExt];
     }
@@ -408,6 +461,7 @@ RCT_EXPORT_METHOD(generateCSR:(NSString *)commonName
     [extensions appendData:extensionsLength];
     [extensions appendData:extensionsContent];
     
+    NSLog(@"[CSR] createExtensions completed: %lu bytes", (unsigned long)extensions.length);
     return extensions;
 }
 
@@ -488,6 +542,7 @@ RCT_EXPORT_METHOD(generateCSR:(NSString *)commonName
 }
 
 - (NSData *)createSANExtensionWithIP:(NSString *)ipAddress deviceInfo:(NSString *)deviceInfo {
+    NSLog(@"[CSR] createSANExtensionWithIP called");
     NSMutableData *extension = [NSMutableData data];
     
     // SEQUENCE tag
@@ -517,10 +572,12 @@ RCT_EXPORT_METHOD(generateCSR:(NSString *)commonName
     [extension appendData:extLength];
     [extension appendData:extContent];
     
+    NSLog(@"[CSR] createSANExtensionWithIP completed: %lu bytes", (unsigned long)extension.length);
     return extension;
 }
 
 - (NSData *)createGeneralNames:(NSString *)ipAddress deviceInfo:(NSString *)deviceInfo {
+    NSLog(@"[CSR] createGeneralNames called");
     NSMutableData *generalNames = [NSMutableData data];
     
     // SEQUENCE tag for GeneralNames
@@ -530,12 +587,14 @@ RCT_EXPORT_METHOD(generateCSR:(NSString *)commonName
     
     // Add IP Address if provided
     if (ipAddress && ipAddress.length > 0) {
+        NSLog(@"[CSR] Encoding IP Address: %@", ipAddress);
         NSData *ipData = [self encodeIPAddress:ipAddress];
         [generalNamesContent appendData:ipData];
     }
     
     // Add otherName with device info if provided
     if (deviceInfo && deviceInfo.length > 0) {
+        NSLog(@"[CSR] Encoding otherName with deviceInfo: %@", deviceInfo);
         NSData *otherNameData = [self encodeOtherName:deviceInfo];
         [generalNamesContent appendData:otherNameData];
     }
@@ -545,6 +604,7 @@ RCT_EXPORT_METHOD(generateCSR:(NSString *)commonName
     [generalNames appendData:lengthData];
     [generalNames appendData:generalNamesContent];
     
+    NSLog(@"[CSR] createGeneralNames completed: %lu bytes", (unsigned long)generalNames.length);
     return generalNames;
 }
 
@@ -567,10 +627,12 @@ RCT_EXPORT_METHOD(generateCSR:(NSString *)commonName
         }
     }
     
+    NSLog(@"[CSR] encodeIPAddress completed: %lu bytes", (unsigned long)ipData.length);
     return ipData;
 }
 
 - (NSData *)encodeOtherName:(NSString *)deviceInfo {
+    NSLog(@"[CSR] encodeOtherName called with: %@", deviceInfo);
     NSMutableData *otherNameData = [NSMutableData data];
     
     // [0] tag for otherName (context-specific, constructed)
@@ -619,12 +681,14 @@ RCT_EXPORT_METHOD(generateCSR:(NSString *)commonName
     [otherNameData appendData:otherNameLength];
     [otherNameData appendData:[otherNameContent subdataWithRange:NSMakeRange(1, otherNameContent.length - 1)]];
     
+    NSLog(@"[CSR] encodeOtherName completed: %lu bytes", (unsigned long)otherNameData.length);
     return otherNameData;
 }
 
 #pragma mark - Attributes
 
 - (NSData *)createAttributes:(NSData *)extensionsData {
+    NSLog(@"[CSR] createAttributes called");
     NSMutableData *attributes = [NSMutableData data];
     
     // [0] tag for attributes (context-specific, constructed)
@@ -661,6 +725,7 @@ RCT_EXPORT_METHOD(generateCSR:(NSString *)commonName
     [attributes appendData:attributesLength];
     [attributes appendData:[attributesContent subdataWithRange:NSMakeRange(1, attributesContent.length - 1)]];
     
+    NSLog(@"[CSR] createAttributes completed: %lu bytes", (unsigned long)attributes.length);
     return attributes;
 }
 
@@ -669,6 +734,7 @@ RCT_EXPORT_METHOD(generateCSR:(NSString *)commonName
 - (NSData *)createCertificationRequestInfo:(NSData *)subject
                                        spki:(NSData *)spki
                                  attributes:(NSData *)attributes {
+    NSLog(@"[CSR] createCertificationRequestInfo called");
     NSMutableData *certRequestInfo = [NSMutableData data];
     
     // SEQUENCE tag
@@ -693,12 +759,14 @@ RCT_EXPORT_METHOD(generateCSR:(NSString *)commonName
     [certRequestInfo appendData:certRequestInfoLength];
     [certRequestInfo appendData:certRequestInfoContent];
     
+    NSLog(@"[CSR] createCertificationRequestInfo completed: %lu bytes", (unsigned long)certRequestInfo.length);
     return certRequestInfo;
 }
 
 #pragma mark - Final CSR
 
 - (NSData *)buildFinalCSR:(NSData *)certRequestInfo signature:(NSData *)signature {
+    NSLog(@"[CSR] buildFinalCSR called");
     NSMutableData *csr = [NSMutableData data];
     
     // SEQUENCE tag
@@ -732,6 +800,7 @@ RCT_EXPORT_METHOD(generateCSR:(NSString *)commonName
     [csr appendData:csrLength];
     [csr appendData:csrContent];
     
+    NSLog(@"[CSR] buildFinalCSR completed: %lu bytes", (unsigned long)csr.length);
     return csr;
 }
 
@@ -850,3 +919,14 @@ RCT_EXPORT_METHOD(generateCSR:(NSString *)commonName
 }
 
 @end
+```
+
+Now run your app and check the Xcode console. You'll see detailed logs like:
+```
+[CSR] Starting CSR generation...
+[CSR] Parameters - CN: device-001, Serial: SERIAL-123, Curve: P-384
+[CSR] DeviceInfo: abc123|Apple_iPhone14
+[CSR] Key size: 384
+[CSR] Generating key pair...
+[CSR] Key pair generated successfully
+...
