@@ -2,19 +2,44 @@
 //  EccCsrGenerator.m
 //  react-native-ecc-csr
 //
-//  iOS native implementation for generating ECC Certificate Signing Requests
+//  iOS native module for generating ECC Certificate Signing Requests
 //
 
 #import "EccCsrGenerator.h"
 #import <Security/Security.h>
 #import <CommonCrypto/CommonCrypto.h>
 
+// Private interface for helper methods
+@interface EccCsrGenerator ()
+
+- (NSData *)createSubjectFromDN:(NSString *)dn;
+- (NSData *)createRDN:(NSString *)attribute value:(NSString *)value;
+- (NSData *)getOIDForAttribute:(NSString *)attribute;
+- (NSData *)encodeAttributeValue:(NSString *)value;
+- (NSData *)createSubjectPublicKeyInfo:(NSData *)publicKeyData keySize:(int)keySize;
+- (NSData *)createAlgorithmIdentifier:(int)keySize;
+- (NSData *)createExtensions:(NSString *)ipAddress phoneDeviceId:(NSString *)phoneDeviceId;
+- (NSData *)createKeyUsageExtension;
+- (NSData *)createExtendedKeyUsageExtension;
+- (NSData *)createSANExtensionWithIP:(NSString *)ipAddress phoneDeviceId:(NSString *)phoneDeviceId;
+- (NSData *)createGeneralNames:(NSString *)ipAddress phoneDeviceId:(NSString *)phoneDeviceId;
+- (NSData *)encodeIPAddress:(NSString *)ipAddress;
+- (NSData *)encodeOtherName:(NSString *)phoneDeviceId;
+- (NSData *)createAttributes:(NSData *)extensionsData;
+- (NSData *)createCertificationRequestInfo:(NSData *)subject spki:(NSData *)spki attributes:(NSData *)attributes;
+- (NSData *)buildFinalCSR:(NSData *)certRequestInfo signature:(NSData *)signature;
+- (NSData *)createSignatureAlgorithmIdentifier;
+- (NSData *)encodeOID:(NSString *)oid;
+- (NSData *)encodeOIDComponent:(NSInteger)value;
+- (NSData *)encodeDERLength:(NSUInteger)length;
+- (NSString *)convertToPEM:(NSData *)derData;
+
+@end
+
 @implementation EccCsrGenerator
 
-// Export with same name as your existing Android module
-RCT_EXPORT_MODULE(CSRModule)
+RCT_EXPORT_MODULE();
 
-// Export the generateCSR method to JavaScript
 RCT_EXPORT_METHOD(generateCSR:(NSDictionary *)params
                   resolver:(RCTPromiseResolveBlock)resolve
                   rejecter:(RCTPromiseRejectBlock)reject)
@@ -29,720 +54,747 @@ RCT_EXPORT_METHOD(generateCSR:(NSDictionary *)params
         NSString *organization = params[@"organization"] ?: @"";
         NSString *organizationalUnit = params[@"organizationalUnit"] ?: @"";
         NSString *ipAddress = params[@"ipAddress"] ?: @"";
+        NSString *phoneDeviceId = params[@"phoneDeviceId"] ?: @"";
         NSString *curve = params[@"curve"] ?: @"secp384r1";  // Default to secp384r1
         NSString *privateKeyAlias = params[@"privateKeyAlias"];
         
-        // Validate required parameters
-        if (commonName.length == 0) {
-            reject(@"INVALID_PARAM", @"commonName is required", nil);
+        // Determine key size based on curve
+        int keySize;
+        if ([curve isEqualToString:@"secp256r1"] || [curve isEqualToString:@"P-256"]) {
+            keySize = 256;
+        } else if ([curve isEqualToString:@"secp384r1"] || [curve isEqualToString:@"P-384"]) {
+            keySize = 384;
+        } else if ([curve isEqualToString:@"secp521r1"] || [curve isEqualToString:@"P-521"]) {
+            keySize = 521;
+        } else {
+            keySize = 384; // Default to P-384
+        }
+        
+        // Generate ECC key pair
+        NSDictionary *keyAttributes = @{
+            (id)kSecAttrKeyType: (id)kSecAttrKeyTypeECSECPrimeRandom,
+            (id)kSecAttrKeySizeInBits: @(keySize),
+            (id)kSecAttrIsPermanent: @NO
+        };
+        
+        CFErrorRef error = NULL;
+        SecKeyRef privateKey = SecKeyCreateRandomKey((__bridge CFDictionaryRef)keyAttributes, &error);
+        
+        if (error != NULL) {
+            NSError *nsError = (__bridge_transfer NSError *)error;
+            reject(@"KEY_GENERATION_ERROR", nsError.localizedDescription, nsError);
             return;
         }
         
-        if (!privateKeyAlias || privateKeyAlias.length == 0) {
-            reject(@"INVALID_PARAM", @"privateKeyAlias is required", nil);
+        SecKeyRef publicKey = SecKeyCopyPublicKey(privateKey);
+        
+        if (publicKey == NULL) {
+            CFRelease(privateKey);
+            reject(@"PUBLIC_KEY_ERROR", @"Failed to extract public key", nil);
             return;
         }
         
-        // Map curve names from secp* to P-* format
-        NSString *normalizedCurve = [self normalizeCurveName:curve];
+        // Build subject DN
+        NSMutableString *subjectDN = [NSMutableString string];
         
-        // Generate ECC key pair with the privateKeyAlias as tag
-        NSError *error = nil;
-        NSDictionary *keyPair = [self generateECKeyPairForCurve:normalizedCurve 
-                                                        withAlias:privateKeyAlias 
-                                                            error:&error];
-        if (error) {
-            reject(@"KEY_GENERATION_ERROR", error.localizedDescription, error);
-            return;
+        if (country && country.length > 0) {
+            [subjectDN appendFormat:@"C=%@, ", country];
+        }
+        if (state && state.length > 0) {
+            [subjectDN appendFormat:@"ST=%@, ", state];
+        }
+        if (locality && locality.length > 0) {
+            [subjectDN appendFormat:@"L=%@, ", locality];
+        }
+        if (organization && organization.length > 0) {
+            [subjectDN appendFormat:@"O=%@, ", organization];
+        }
+        if (organizationalUnit && organizationalUnit.length > 0) {
+            [subjectDN appendFormat:@"OU=%@, ", organizationalUnit];
         }
         
-        SecKeyRef privateKey = (__bridge SecKeyRef)keyPair[@"privateKey"];
-        SecKeyRef publicKey = (__bridge SecKeyRef)keyPair[@"publicKey"];
-        BOOL isHardwareBacked = [keyPair[@"isHardwareBacked"] boolValue];
+        [subjectDN appendFormat:@"CN=%@", commonName];
+        
+        if (serialNumber && serialNumber.length > 0) {
+            [subjectDN appendFormat:@"/serialNumber=%@", serialNumber];
+        }
+        
+        // Create subject from DN string
+        NSData *subjectData = [self createSubjectFromDN:subjectDN];
         
         // Get public key data
-        NSData *publicKeyData = [self exportPublicKey:publicKey error:&error];
-        if (error) {
-            reject(@"PUBLIC_KEY_ERROR", error.localizedDescription, error);
+        CFErrorRef pubKeyError = NULL;
+        NSData *publicKeyData = (NSData *)CFBridgingRelease(
+            SecKeyCopyExternalRepresentation(publicKey, &pubKeyError)
+        );
+        
+        if (pubKeyError != NULL) {
+            NSError *nsError = (__bridge_transfer NSError *)pubKeyError;
+            CFRelease(privateKey);
+            CFRelease(publicKey);
+            reject(@"PUBLIC_KEY_EXPORT_ERROR", nsError.localizedDescription, nsError);
             return;
         }
         
-        // Build CSR
-        NSData *csrData = [self buildCSRWithSubject:@{
-            @"CN": commonName,
-            @"serialNumber": serialNumber,
-            @"C": country,
-            @"ST": state,
-            @"L": locality,
-            @"O": organization,
-            @"OU": organizationalUnit
-        }
-                                          publicKey:publicKey
-                                         privateKey:privateKey
-                                              curve:normalizedCurve
-                                          ipAddress:ipAddress
-                                              error:&error];
+        // Create Subject Public Key Info
+        NSData *spki = [self createSubjectPublicKeyInfo:publicKeyData keySize:keySize];
         
-        if (error) {
-            reject(@"CSR_GENERATION_ERROR", error.localizedDescription, error);
+        // Create extensions
+        NSData *extensionsData = [self createExtensions:ipAddress phoneDeviceId:phoneDeviceId];
+        
+        // Create attributes (with extensions)
+        NSData *attributesData = [self createAttributes:extensionsData];
+        
+        // Create CertificationRequestInfo
+        NSData *certRequestInfo = [self createCertificationRequestInfo:subjectData
+                                                                   spki:spki
+                                                             attributes:attributesData];
+        
+        // Sign the CSR
+        CFErrorRef signError = NULL;
+        NSData *signature = (NSData *)CFBridgingRelease(
+            SecKeyCreateSignature(privateKey,
+                                kSecKeyAlgorithmECDSASignatureMessageX962SHA256,
+                                (__bridge CFDataRef)certRequestInfo,
+                                &signError)
+        );
+        
+        if (signError != NULL) {
+            NSError *nsError = (__bridge_transfer NSError *)signError;
+            CFRelease(privateKey);
+            CFRelease(publicKey);
+            reject(@"SIGNING_ERROR", nsError.localizedDescription, nsError);
             return;
         }
         
-        // Convert to PEM format
-        NSString *csrPEM = [self convertToPEM:csrData label:@"CERTIFICATE REQUEST"];
-        NSString *publicKeyPEM = [self convertToPEM:publicKeyData label:@"PUBLIC KEY"];
+        // Build final CSR
+        NSData *csrData = [self buildFinalCSR:certRequestInfo signature:signature];
         
-        // Return result matching Android API
-        resolve(@{
+        // Convert to PEM
+        NSString *csrPEM = [self convertToPEM:csrData];
+        
+        // Get public key in PEM format
+        NSString *publicKeyPEM = [publicKeyData base64EncodedStringWithOptions:0];
+        
+        // Clean up
+        CFRelease(privateKey);
+        CFRelease(publicKey);
+        
+        // Return result
+        NSDictionary *result = @{
             @"csr": csrPEM,
-            @"privateKeyAlias": privateKeyAlias,  // Return the alias, not the key
-            @"publicKey": publicKeyPEM,
-            @"isHardwareBacked": @(isHardwareBacked)
-        });
-        
-    } @catch (NSException *exception) {
-        reject(@"EXCEPTION", exception.reason, nil);
-    }
-}
-
-// Additional methods to match Android API
-
-RCT_EXPORT_METHOD(deleteKey:(NSString *)privateKeyAlias
-                  resolver:(RCTPromiseResolveBlock)resolve
-                  rejecter:(RCTPromiseRejectBlock)reject)
-{
-    @try {
-        BOOL success = [self deleteKeyWithAlias:privateKeyAlias];
-        resolve(@(success));
-    } @catch (NSException *exception) {
-        reject(@"DELETE_KEY_ERROR", exception.reason, nil);
-    }
-}
-
-RCT_EXPORT_METHOD(keyExists:(NSString *)privateKeyAlias
-                  resolver:(RCTPromiseResolveBlock)resolve
-                  rejecter:(RCTPromiseRejectBlock)reject)
-{
-    @try {
-        BOOL exists = [self keyExistsWithAlias:privateKeyAlias];
-        resolve(@(exists));
-    } @catch (NSException *exception) {
-        reject(@"KEY_EXISTS_ERROR", exception.reason, nil);
-    }
-}
-
-RCT_EXPORT_METHOD(getPublicKey:(NSString *)privateKeyAlias
-                  resolver:(RCTPromiseResolveBlock)resolve
-                  rejecter:(RCTPromiseRejectBlock)reject)
-{
-    @try {
-        NSError *error = nil;
-        NSString *publicKeyPEM = [self getPublicKeyForAlias:privateKeyAlias error:&error];
-        
-        if (error) {
-            reject(@"GET_PUBLIC_KEY_ERROR", error.localizedDescription, error);
-            return;
-        }
-        
-        resolve(publicKeyPEM);
-    } @catch (NSException *exception) {
-        reject(@"GET_PUBLIC_KEY_ERROR", exception.reason, nil);
-    }
-}
-
-#pragma mark - Helper Methods
-
-- (NSString *)normalizeCurveName:(NSString *)curveName {
-    // Map secp* names to P-* format
-    if ([curveName isEqualToString:@"secp256r1"]) {
-        return @"P-256";
-    } else if ([curveName isEqualToString:@"secp384r1"]) {
-        return @"P-384";
-    } else if ([curveName isEqualToString:@"secp521r1"]) {
-        return @"P-521";
-    }
-    // Default to P-384 if unknown
-    return @"P-384";
-}
-
-- (BOOL)isKeyHardwareBacked:(SecKeyRef)key {
-    if (key == NULL) {
-        return NO;
-    }
-    
-    // Check if key is in Secure Enclave
-    NSDictionary *attributes = (__bridge_transfer NSDictionary *)SecKeyCopyAttributes(key);
-    NSString *tokenID = attributes[(id)kSecAttrTokenID];
-    
-    return [tokenID isEqualToString:(NSString *)kSecAttrTokenIDSecureEnclave];
-}
-
-- (BOOL)deleteKeyWithAlias:(NSString *)alias {
-    NSData *tag = [alias dataUsingEncoding:NSUTF8StringEncoding];
-    
-    NSDictionary *query = @{
-        (id)kSecClass: (id)kSecClassKey,
-        (id)kSecAttrApplicationTag: tag,
-        (id)kSecAttrKeyType: (id)kSecAttrKeyTypeECSECPrimeRandom,
-    };
-    
-    OSStatus status = SecItemDelete((__bridge CFDictionaryRef)query);
-    return status == errSecSuccess || status == errSecItemNotFound;
-}
-
-- (BOOL)keyExistsWithAlias:(NSString *)alias {
-    NSData *tag = [alias dataUsingEncoding:NSUTF8StringEncoding];
-    
-    NSDictionary *query = @{
-        (id)kSecClass: (id)kSecClassKey,
-        (id)kSecAttrApplicationTag: tag,
-        (id)kSecAttrKeyType: (id)kSecAttrKeyTypeECSECPrimeRandom,
-        (id)kSecReturnRef: @YES,
-    };
-    
-    CFTypeRef result = NULL;
-    OSStatus status = SecItemCopyMatching((__bridge CFDictionaryRef)query, &result);
-    
-    if (result) {
-        CFRelease(result);
-    }
-    
-    return status == errSecSuccess;
-}
-
-- (NSString *)getPublicKeyForAlias:(NSString *)alias error:(NSError **)error {
-    NSData *tag = [alias dataUsingEncoding:NSUTF8StringEncoding];
-    
-    NSDictionary *query = @{
-        (id)kSecClass: (id)kSecClassKey,
-        (id)kSecAttrApplicationTag: tag,
-        (id)kSecAttrKeyType: (id)kSecAttrKeyTypeECSECPrimeRandom,
-        (id)kSecReturnRef: @YES,
-    };
-    
-    CFTypeRef result = NULL;
-    OSStatus status = SecItemCopyMatching((__bridge CFDictionaryRef)query, &result);
-    
-    if (status != errSecSuccess) {
-        if (error) {
-            *error = [NSError errorWithDomain:@"CSRModule" 
-                                         code:status 
-                                     userInfo:@{NSLocalizedDescriptionKey: @"Key not found"}];
-        }
-        return nil;
-    }
-    
-    SecKeyRef privateKey = (SecKeyRef)result;
-    SecKeyRef publicKey = SecKeyCopyPublicKey(privateKey);
-    CFRelease(result);
-    
-    if (!publicKey) {
-        if (error) {
-            *error = [NSError errorWithDomain:@"CSRModule" 
-                                         code:-1 
-                                     userInfo:@{NSLocalizedDescriptionKey: @"Could not extract public key"}];
-        }
-        return nil;
-    }
-    
-    NSData *publicKeyData = [self exportPublicKey:publicKey error:error];
-    CFRelease(publicKey);
-    
-    if (!publicKeyData) {
-        return nil;
-    }
-    
-    return [self convertToPEM:publicKeyData label:@"PUBLIC KEY"];
-}
-
-#pragma mark - Key Generation
-
-- (NSDictionary *)generateECKeyPairForCurve:(NSString *)curveName 
-                                  withAlias:(NSString *)alias 
-                                      error:(NSError **)error {
-    // Map curve names to key sizes
-    int keySize = 384; // Default P-384
-    if ([curveName isEqualToString:@"P-256"]) {
-        keySize = 256;
-    } else if ([curveName isEqualToString:@"P-521"]) {
-        keySize = 521;
-    }
-    
-    // Use the alias as the keychain tag
-    NSData *tagData = [alias dataUsingEncoding:NSUTF8StringEncoding];
-    
-    BOOL isHardwareBacked = NO;
-    SecKeyRef privateKey = NULL;
-    
-    // IMPORTANT: Secure Enclave only supports P-256 on iOS
-    // For P-256, try Secure Enclave first, then fall back to software
-    // For P-384 and P-521, use software directly
-    
-    if (keySize == 256) {
-        // Try Secure Enclave for P-256
-        NSDictionary *secureEnclaveParams = @{
-            (id)kSecAttrKeyType: (id)kSecAttrKeyTypeECSECPrimeRandom,
-            (id)kSecAttrKeySizeInBits: @(keySize),
-            (id)kSecAttrTokenID: (id)kSecAttrTokenIDSecureEnclave,  // Use Secure Enclave
-            (id)kSecPrivateKeyAttrs: @{
-                (id)kSecAttrIsPermanent: @YES,
-                (id)kSecAttrApplicationTag: tagData,
-            }
+            @"publicKey": publicKeyPEM
         };
         
-        CFErrorRef cfError = NULL;
-        privateKey = SecKeyCreateRandomKey((__bridge CFDictionaryRef)secureEnclaveParams, &cfError);
+        resolve(result);
         
-        if (privateKey != NULL) {
-            // Successfully created in Secure Enclave
-            isHardwareBacked = YES;
-            NSLog(@"✅ Key created in Secure Enclave (hardware-backed)");
-        } else {
-            // Secure Enclave failed, fall back to software
-            NSLog(@"⚠️ Secure Enclave failed: %@", (__bridge NSError *)cfError);
-            NSLog(@"Falling back to software key generation...");
+    } @catch (NSException *exception) {
+        reject(@"CSR_GENERATION_ERROR", exception.reason, nil);
+    }
+}
+
+#pragma mark - Subject DN Creation
+
+- (NSData *)createSubjectFromDN:(NSString *)dn {
+    NSMutableData *subjectData = [NSMutableData data];
+    
+    // SEQUENCE tag
+    [subjectData appendBytes:(uint8_t[]){0x30} length:1];
+    
+    NSMutableData *subjectContent = [NSMutableData data];
+    
+    // Split DN by commas
+    NSArray *components = [dn componentsSeparatedByString:@", "];
+    
+    for (NSString *component in components) {
+        NSArray *keyValue = [component componentsSeparatedByString:@"="];
+        if (keyValue.count == 2) {
+            NSString *key = [keyValue[0] stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceCharacterSet]];
+            NSString *value = [keyValue[1] stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceCharacterSet]];
             
-            if (cfError) {
-                CFRelease(cfError);
-                cfError = NULL;
-            }
+            NSData *rdnData = [self createRDN:key value:value];
+            [subjectContent appendData:rdnData];
         }
     }
     
-    // If Secure Enclave failed or not P-256, create software key
-    if (privateKey == NULL) {
-        NSDictionary *softwareParams = @{
-            (id)kSecAttrKeyType: (id)kSecAttrKeyTypeECSECPrimeRandom,
-            (id)kSecAttrKeySizeInBits: @(keySize),
-            // NO kSecAttrTokenID - creates software key
-            (id)kSecPrivateKeyAttrs: @{
-                (id)kSecAttrIsPermanent: @YES,
-                (id)kSecAttrApplicationTag: tagData,
-            }
-        };
-        
-        CFErrorRef cfError = NULL;
-        privateKey = SecKeyCreateRandomKey((__bridge CFDictionaryRef)softwareParams, &cfError);
-        
-        if (cfError) {
-            if (error) {
-                *error = (__bridge_transfer NSError *)cfError;
-            }
-            return nil;
-        }
-        
-        isHardwareBacked = NO;
-        if (keySize == 256) {
-            NSLog(@"ℹ️ Key created in software (Secure Enclave fallback)");
-        } else {
-            NSLog(@"ℹ️ Key created in software (P-%d does not support Secure Enclave)", keySize);
-        }
-    }
+    // Add length
+    NSData *lengthData = [self encodeDERLength:subjectContent.length];
+    [subjectData appendData:lengthData];
+    [subjectData appendData:subjectContent];
     
-    SecKeyRef publicKey = SecKeyCopyPublicKey(privateKey);
-    
-    return @{
-        @"privateKey": (__bridge_transfer id)privateKey,
-        @"publicKey": (__bridge_transfer id)publicKey,
-        @"isHardwareBacked": @(isHardwareBacked)
-    };
+    return subjectData;
 }
 
-- (NSData *)exportPublicKey:(SecKeyRef)publicKey error:(NSError **)error {
-    CFErrorRef cfError = NULL;
-    NSData *keyData = (__bridge_transfer NSData *)SecKeyCopyExternalRepresentation(publicKey, &cfError);
+- (NSData *)createRDN:(NSString *)attribute value:(NSString *)value {
+    NSMutableData *rdnData = [NSMutableData data];
     
-    if (cfError) {
-        if (error) {
-            *error = (__bridge_transfer NSError *)cfError;
-        }
-        return nil;
-    }
+    // SET tag
+    [rdnData appendBytes:(uint8_t[]){0x31} length:1];
     
-    // Wrap in SubjectPublicKeyInfo structure
-    NSData *spki = [self wrapPublicKeyInSPKI:keyData curve:[self getCurveFromKey:publicKey]];
-    return spki;
-}
-
-- (NSString *)getCurveFromKey:(SecKeyRef)key {
-    NSDictionary *attributes = (__bridge_transfer NSDictionary *)SecKeyCopyAttributes(key);
-    NSNumber *keySize = attributes[(id)kSecAttrKeySizeInBits];
+    NSMutableData *setContent = [NSMutableData data];
     
-    if ([keySize intValue] == 256) return @"P-256";
-    if ([keySize intValue] == 384) return @"P-384";
-    if ([keySize intValue] == 521) return @"P-521";
+    // SEQUENCE tag
+    [setContent appendBytes:(uint8_t[]){0x30} length:1];
     
-    return @"P-384";
-}
-
-#pragma mark - CSR Building
-
-- (NSData *)buildCSRWithSubject:(NSDictionary *)subject
-                      publicKey:(SecKeyRef)publicKey
-                     privateKey:(SecKeyRef)privateKey
-                          curve:(NSString *)curve
-                      ipAddress:(NSString *)ipAddress
-                          error:(NSError **)error {
+    NSMutableData *seqContent = [NSMutableData data];
     
-    // Build the CSR components
-    NSData *subjectDN = [self encodeDN:subject];
-    NSData *publicKeyInfo = [self exportPublicKey:publicKey error:error];
-    if (*error) return nil;
-    
-    NSData *extensions = [self buildExtensions:ipAddress];
-    NSData *attributes = [self buildAttributes:extensions];
-    
-    // Build CertificationRequestInfo
-    NSData *certRequestInfo = [self buildCertificationRequestInfo:subjectDN
-                                                       publicKeyInfo:publicKeyInfo
-                                                          attributes:attributes];
-    
-    // Sign the CertificationRequestInfo
-    NSData *signature = [self signData:certRequestInfo withPrivateKey:privateKey error:error];
-    if (*error) return nil;
-    
-    // Build final CSR
-    NSData *csr = [self buildFinalCSR:certRequestInfo signature:signature curve:curve];
-    
-    return csr;
-}
-
-- (NSData *)buildCertificationRequestInfo:(NSData *)subject
-                            publicKeyInfo:(NSData *)publicKeyInfo
-                               attributes:(NSData *)attributes {
-    NSMutableData *certRequestInfo = [NSMutableData data];
-    
-    // Version (INTEGER 0)
-    NSData *version = [self encodeInteger:0];
-    
-    // Combine all components
-    [certRequestInfo appendData:version];
-    [certRequestInfo appendData:subject];
-    [certRequestInfo appendData:publicKeyInfo];
-    [certRequestInfo appendData:attributes];
-    
-    // Wrap in SEQUENCE
-    return [self wrapInSequence:certRequestInfo];
-}
-
-- (NSData *)buildFinalCSR:(NSData *)certRequestInfo
-                signature:(NSData *)signature
-                    curve:(NSString *)curve {
-    NSMutableData *csr = [NSMutableData data];
-    
-    // Add CertificationRequestInfo
-    [csr appendData:certRequestInfo];
-    
-    // Add SignatureAlgorithm (ecdsa-with-SHA256)
-    NSData *signatureAlgorithm = [self encodeSignatureAlgorithm];
-    [csr appendData:signatureAlgorithm];
-    
-    // Add Signature (BIT STRING)
-    NSData *signatureBitString = [self encodeBitString:signature];
-    [csr appendData:signatureBitString];
-    
-    // Wrap entire CSR in SEQUENCE
-    return [self wrapInSequence:csr];
-}
-
-#pragma mark - DN Encoding
-
-- (NSData *)encodeDN:(NSDictionary *)subject {
-    NSMutableData *dn = [NSMutableData data];
-    
-    // Order matters for DN: C, ST, L, O, OU, CN, serialNumber
-    NSArray *order = @[@"C", @"ST", @"L", @"O", @"OU", @"CN", @"serialNumber"];
-    
-    for (NSString *key in order) {
-        NSString *value = subject[key];
-        if (value && value.length > 0) {
-            NSData *rdn = [self encodeRDN:key value:value];
-            [dn appendData:rdn];
-        }
-    }
-    
-    return [self wrapInSequence:dn];
-}
-
-- (NSData *)encodeRDN:(NSString *)key value:(NSString *)value {
     // Get OID for attribute
-    NSData *oid = [self getOIDForAttribute:key];
+    NSData *oidData = [self getOIDForAttribute:attribute];
+    [seqContent appendData:oidData];
     
-    // ⭐️ CRITICAL FIX: Match Android's encoding exactly
-    // Country (C) and serialNumber use PrintableString (0x13)
-    // All other fields use UTF8String (0x0C)
-    NSData *stringValue;
+    // Value as PrintableString or UTF8String
+    NSData *valueData = [self encodeAttributeValue:value];
+    [seqContent appendData:valueData];
     
-    if ([key isEqualToString:@"C"] || [key isEqualToString:@"serialNumber"]) {
-        stringValue = [self encodePrintableString:value];
-    } else {
-        stringValue = [self encodeUTF8String:value];
-    }
+    // Add length for SEQUENCE
+    NSData *seqLengthData = [self encodeDERLength:seqContent.length];
+    [setContent appendData:seqLengthData];
+    [setContent appendData:seqContent];
     
-    // AttributeTypeAndValue = SEQUENCE { type OID, value ANY }
-    NSMutableData *atav = [NSMutableData data];
-    [atav appendData:oid];
-    [atav appendData:stringValue];
-    NSData *atavSeq = [self wrapInSequence:atav];
+    // Add length for SET
+    NSData *setLengthData = [self encodeDERLength:setContent.length];
+    [rdnData appendData:setLengthData];
+    [rdnData appendData:setContent];
     
-    // RDN = SET OF AttributeTypeAndValue
-    return [self wrapInSet:atavSeq];
+    return rdnData;
 }
 
 - (NSData *)getOIDForAttribute:(NSString *)attribute {
     NSDictionary *oidMap = @{
-        @"C": @"2.5.4.6",           // countryName
-        @"ST": @"2.5.4.8",          // stateOrProvinceName
-        @"L": @"2.5.4.7",           // localityName
-        @"O": @"2.5.4.10",          // organizationName
-        @"OU": @"2.5.4.11",         // organizationalUnitName
-        @"CN": @"2.5.4.3",          // commonName
-        @"serialNumber": @"2.5.4.5" // serialNumber
+        @"C": @"2.5.4.6",
+        @"ST": @"2.5.4.8",
+        @"L": @"2.5.4.7",
+        @"O": @"2.5.4.10",
+        @"OU": @"2.5.4.11",
+        @"CN": @"2.5.4.3",
+        @"serialNumber": @"2.5.4.5"
     };
     
-    return [self encodeOID:oidMap[attribute]];
-}
-
-#pragma mark - Extensions
-
-- (NSData *)buildExtensions:(NSString *)ipAddress {
-    NSMutableData *extensions = [NSMutableData data];
-    
-    // Key Usage extension (critical)
-    NSData *keyUsage = [self buildKeyUsageExtension];
-    [extensions appendData:keyUsage];
-    
-    // Extended Key Usage extension
-    NSData *extKeyUsage = [self buildExtendedKeyUsageExtension];
-    [extensions appendData:extKeyUsage];
-    
-    // Subject Alternative Name extension (if IP provided)
-    if (ipAddress && ipAddress.length > 0) {
-        NSData *san = [self buildSubjectAltNameExtension:ipAddress];
-        [extensions appendData:san];
+    NSString *oid = oidMap[attribute];
+    if (oid) {
+        return [self encodeOID:oid];
     }
     
-    return [self wrapInSequence:extensions];
+    // Default to CN if unknown
+    return [self encodeOID:@"2.5.4.3"];
 }
 
-- (NSData *)buildKeyUsageExtension {
-    // KeyUsage: digitalSignature (bit 0), keyAgreement (bit 4)
-    // Bit positions (from left/MSB):
-    //   Bit 0: digitalSignature = 10000000 = 0x80
-    //   Bit 4: keyAgreement     = 00001000 = 0x08
-    //   Combined:                 10001000 = 0x88
-    //
-    // ⭐️ CRITICAL: DER BIT STRING format: [unused_bits, data_bytes...]
-    // Since we only use bits 0 and 4 (5 bits total), we have 3 unused bits
-    // Android uses: 03 02 03 88 (3 unused bits)
-    // We must match this exactly!
-    
-    unsigned char bitStringValue[] = {0x03, 0x88}; // 3 unused bits, bits 10001000
-    
-    // Properly encode as BIT STRING
-    NSMutableData *encodedBitString = [NSMutableData data];
-    unsigned char tag = 0x03; // BIT STRING tag
-    unsigned char length = 0x02; // Length is 2 bytes
-    [encodedBitString appendBytes:&tag length:1];
-    [encodedBitString appendBytes:&length length:1];
-    [encodedBitString appendBytes:bitStringValue length:2];
-    
-    return [self buildExtension:@"2.5.29.15" critical:YES value:encodedBitString];
-}
-
-- (NSData *)buildExtendedKeyUsageExtension {
-    // ExtKeyUsage: TLS Web Client Authentication (1.3.6.1.5.5.7.3.2)
-    NSData *clientAuthOID = [self encodeOID:@"1.3.6.1.5.5.7.3.2"];
-    NSData *sequence = [self wrapInSequence:clientAuthOID];
-    
-    return [self buildExtension:@"2.5.29.37" critical:NO value:sequence];
-}
-
-- (NSData *)buildSubjectAltNameExtension:(NSString *)ipAddress {
-    // Parse IP address
-    NSArray *octets = [ipAddress componentsSeparatedByString:@"."];
-    if (octets.count != 4) {
-        return [NSData data];
-    }
-    
-    // Build IP address (CONTEXT SPECIFIC [7])
-    unsigned char ipBytes[4];
-    for (int i = 0; i < 4; i++) {
-        ipBytes[i] = (unsigned char)[octets[i] intValue];
-    }
-    
-    NSMutableData *ipTag = [NSMutableData data];
-    unsigned char tag = 0x87; // CONTEXT [7]
-    unsigned char length = 0x04;
-    [ipTag appendBytes:&tag length:1];
-    [ipTag appendBytes:&length length:1];
-    [ipTag appendBytes:ipBytes length:4];
-    
-    NSData *sanSequence = [self wrapInSequence:ipTag];
-    
-    return [self buildExtension:@"2.5.29.17" critical:NO value:sanSequence];
-}
-
-- (NSData *)buildExtension:(NSString *)oidString critical:(BOOL)critical value:(NSData *)value {
-    NSMutableData *extension = [NSMutableData data];
-    
-    // Extension OID
-    [extension appendData:[self encodeOID:oidString]];
-    
-    // Critical flag (if true)
-    if (critical) {
-        NSData *criticalBool = [NSData dataWithBytes:(unsigned char[]){0x01, 0x01, 0xFF} length:3];
-        [extension appendData:criticalBool];
-    }
-    
-    // Extension value (OCTET STRING)
-    [extension appendData:[self encodeOctetString:value]];
-    
-    return [self wrapInSequence:extension];
-}
-
-- (NSData *)buildAttributes:(NSData *)extensions {
-    // Attributes = CONTEXT SPECIFIC [0]
-    // Contains extensionRequest attribute
-    
-    // Extension Request OID: 1.2.840.113549.1.9.14
-    NSData *extReqOID = [self encodeOID:@"1.2.840.113549.1.9.14"];
-    
-    // Wrap extensions in SET
-    NSData *extSet = [self wrapInSet:extensions];
-    
-    // Build attribute SEQUENCE
-    NSMutableData *attribute = [NSMutableData data];
-    [attribute appendData:extReqOID];
-    [attribute appendData:extSet];
-    NSData *attrSeq = [self wrapInSequence:attribute];
-    
-    // Wrap in CONTEXT SPECIFIC [0]
-    return [self wrapInContext:attrSeq tag:0];
-}
-
-#pragma mark - Signing
-
-// ✅ FIXED: This method was causing the "Signature did not match" error
-// The bug was double-hashing: manually hashing with SHA-256, then using
-// kSecKeyAlgorithmECDSASignatureMessageX962SHA256 which also hashes.
-// Solution: Use kSecKeyAlgorithmECDSASignatureDigestX962SHA256 which expects pre-hashed data.
-- (NSData *)signData:(NSData *)data withPrivateKey:(SecKeyRef)privateKey error:(NSError **)error {
-    // Hash the data with SHA-256
-    NSMutableData *hash = [NSMutableData dataWithLength:CC_SHA256_DIGEST_LENGTH];
-    CC_SHA256(data.bytes, (CC_LONG)data.length, hash.mutableBytes);
-    
-    // Sign the hash using DigestX962SHA256 which expects pre-hashed data
-    // This prevents double-hashing that was causing signature verification to fail
-    CFErrorRef cfError = NULL;
-    NSData *signature = (__bridge_transfer NSData *)SecKeyCreateSignature(
-        privateKey,
-        kSecKeyAlgorithmECDSASignatureDigestX962SHA256,  // ✅ Changed from MessageX962SHA256 to DigestX962SHA256
-        (__bridge CFDataRef)hash,
-        &cfError
-    );
-    
-    if (cfError) {
-        if (error) {
-            *error = (__bridge_transfer NSError *)cfError;
-        }
-        return nil;
-    }
-    
-    return signature;
-}
-
-- (NSData *)encodeSignatureAlgorithm {
-    // ecdsa-with-SHA256 OID: 1.2.840.10045.4.3.2
-    NSData *oid = [self encodeOID:@"1.2.840.10045.4.3.2"];
-    return [self wrapInSequence:oid];
-}
-
-#pragma mark - Public Key Info
-
-- (NSData *)wrapPublicKeyInSPKI:(NSData *)publicKeyData curve:(NSString *)curve {
-    NSMutableData *spki = [NSMutableData data];
-    
-    // Algorithm Identifier
-    NSData *algorithm = [self encodeAlgorithmIdentifier:curve];
-    [spki appendData:algorithm];
-    
-    // Public Key (BIT STRING)
-    NSData *publicKeyBitString = [self encodeBitString:publicKeyData];
-    [spki appendData:publicKeyBitString];
-    
-    return [self wrapInSequence:spki];
-}
-
-- (NSData *)encodeAlgorithmIdentifier:(NSString *)curve {
-    NSMutableData *algId = [NSMutableData data];
-    
-    // ECC Public Key OID: 1.2.840.10045.2.1
-    NSData *eccOID = [self encodeOID:@"1.2.840.10045.2.1"];
-    [algId appendData:eccOID];
-    
-    // Curve OID
-    NSString *curveOID = @"1.2.840.10045.3.1.7"; // Default P-256
-    if ([curve isEqualToString:@"P-384"]) {
-        curveOID = @"1.3.132.0.34"; // secp384r1
-    } else if ([curve isEqualToString:@"P-521"]) {
-        curveOID = @"1.3.132.0.35"; // secp521r1
-    }
-    
-    NSData *curveOIDData = [self encodeOID:curveOID];
-    [algId appendData:curveOIDData];
-    
-    return [self wrapInSequence:algId];
-}
-
-#pragma mark - ASN.1 Encoding Primitives
-
-- (NSData *)encodeInteger:(NSInteger)value {
+- (NSData *)encodeAttributeValue:(NSString *)value {
     NSMutableData *data = [NSMutableData data];
-    unsigned char tag = 0x02; // INTEGER
-    unsigned char length = 0x01;
-    unsigned char val = (unsigned char)value;
     
-    [data appendBytes:&tag length:1];
-    [data appendBytes:&length length:1];
-    [data appendBytes:&val length:1];
+    // Use PrintableString (0x13) for simple values, UTF8String (0x0C) for others
+    BOOL isPrintable = YES;
+    NSCharacterSet *printableSet = [NSCharacterSet characterSetWithCharactersInString:
+                                   @"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789 '()+,-./:=?"];
+    
+    for (NSUInteger i = 0; i < value.length; i++) {
+        unichar c = [value characterAtIndex:i];
+        if (![printableSet characterIsMember:c]) {
+            isPrintable = NO;
+            break;
+        }
+    }
+    
+    if (isPrintable) {
+        // PrintableString
+        [data appendBytes:(uint8_t[]){0x13} length:1];
+    } else {
+        // UTF8String
+        [data appendBytes:(uint8_t[]){0x0C} length:1];
+    }
+    
+    NSData *stringData = [value dataUsingEncoding:NSUTF8StringEncoding];
+    NSData *lengthData = [self encodeDERLength:stringData.length];
+    [data appendData:lengthData];
+    [data appendData:stringData];
     
     return data;
 }
 
-- (NSData *)encodeOID:(NSString *)oidString {
-    NSArray *components = [oidString componentsSeparatedByString:@"."];
+#pragma mark - Subject Public Key Info
+
+- (NSData *)createSubjectPublicKeyInfo:(NSData *)publicKeyData keySize:(int)keySize {
+    NSMutableData *spki = [NSMutableData data];
+    
+    // SEQUENCE tag
+    [spki appendBytes:(uint8_t[]){0x30} length:1];
+    
+    NSMutableData *spkiContent = [NSMutableData data];
+    
+    // Algorithm Identifier
+    NSData *algorithmIdentifier = [self createAlgorithmIdentifier:keySize];
+    [spkiContent appendData:algorithmIdentifier];
+    
+    // Subject Public Key (BIT STRING)
+    NSMutableData *bitString = [NSMutableData data];
+    [bitString appendBytes:(uint8_t[]){0x03} length:1]; // BIT STRING tag
+    
+    NSMutableData *bitStringContent = [NSMutableData data];
+    [bitStringContent appendBytes:(uint8_t[]){0x00} length:1]; // No unused bits
+    [bitStringContent appendData:publicKeyData];
+    
+    NSData *bitStringLength = [self encodeDERLength:bitStringContent.length];
+    [bitString appendData:bitStringLength];
+    [bitString appendData:bitStringContent];
+    
+    [spkiContent appendData:bitString];
+    
+    // Add length
+    NSData *spkiLength = [self encodeDERLength:spkiContent.length];
+    [spki appendData:spkiLength];
+    [spki appendData:spkiContent];
+    
+    return spki;
+}
+
+- (NSData *)createAlgorithmIdentifier:(int)keySize {
+    NSMutableData *algId = [NSMutableData data];
+    
+    // SEQUENCE tag
+    [algId appendBytes:(uint8_t[]){0x30} length:1];
+    
+    NSMutableData *algIdContent = [NSMutableData data];
+    
+    // OID for ecPublicKey: 1.2.840.10045.2.1
+    NSData *ecPublicKeyOID = [self encodeOID:@"1.2.840.10045.2.1"];
+    [algIdContent appendData:ecPublicKeyOID];
+    
+    // Named curve OID
+    NSString *curveOID;
+    if (keySize == 256) {
+        curveOID = @"1.2.840.10045.3.1.7"; // secp256r1
+    } else if (keySize == 384) {
+        curveOID = @"1.3.132.0.34"; // secp384r1
+    } else if (keySize == 521) {
+        curveOID = @"1.3.132.0.35"; // secp521r1
+    } else {
+        curveOID = @"1.3.132.0.34"; // Default to secp384r1
+    }
+    
+    NSData *namedCurveOID = [self encodeOID:curveOID];
+    [algIdContent appendData:namedCurveOID];
+    
+    // Add length
+    NSData *algIdLength = [self encodeDERLength:algIdContent.length];
+    [algId appendData:algIdLength];
+    [algId appendData:algIdContent];
+    
+    return algId;
+}
+
+#pragma mark - Extensions
+
+- (NSData *)createExtensions:(NSString *)ipAddress phoneDeviceId:(NSString *)phoneDeviceId {
+    NSMutableData *extensions = [NSMutableData data];
+    
+    // SEQUENCE tag
+    [extensions appendBytes:(uint8_t[]){0x30} length:1];
+    
+    NSMutableData *extensionsContent = [NSMutableData data];
+    
+    // Key Usage extension
+    NSData *keyUsageExt = [self createKeyUsageExtension];
+    [extensionsContent appendData:keyUsageExt];
+    
+    // Extended Key Usage extension
+    NSData *extKeyUsageExt = [self createExtendedKeyUsageExtension];
+    [extensionsContent appendData:extKeyUsageExt];
+    
+    // Subject Alternative Name extension (if IP or phoneDeviceId provided)
+    if ((ipAddress && ipAddress.length > 0) || (phoneDeviceId && phoneDeviceId.length > 0)) {
+        NSData *sanExt = [self createSANExtensionWithIP:ipAddress phoneDeviceId:phoneDeviceId];
+        [extensionsContent appendData:sanExt];
+    }
+    
+    // Add length
+    NSData *extensionsLength = [self encodeDERLength:extensionsContent.length];
+    [extensions appendData:extensionsLength];
+    [extensions appendData:extensionsContent];
+    
+    return extensions;
+}
+
+- (NSData *)createKeyUsageExtension {
+    NSMutableData *extension = [NSMutableData data];
+    
+    // SEQUENCE tag
+    [extension appendBytes:(uint8_t[]){0x30} length:1];
+    
+    NSMutableData *extContent = [NSMutableData data];
+    
+    // OID for keyUsage: 2.5.29.15
+    NSData *oid = [self encodeOID:@"2.5.29.15"];
+    [extContent appendData:oid];
+    
+    // Critical: TRUE
+    [extContent appendBytes:(uint8_t[]){0x01, 0x01, 0xFF} length:3];
+    
+    // Extension value (OCTET STRING containing BIT STRING)
+    NSMutableData *extValue = [NSMutableData data];
+    [extValue appendBytes:(uint8_t[]){0x04} length:1]; // OCTET STRING tag
+    
+    // BIT STRING with keyUsage flags
+    uint8_t bitStringValue[] = {0x03, 0x02, 0x05, 0x88};
+    NSData *bitStringLength = [self encodeDERLength:sizeof(bitStringValue)];
+    [extValue appendData:bitStringLength];
+    [extValue appendBytes:bitStringValue length:sizeof(bitStringValue)];
+    
+    [extContent appendData:extValue];
+    
+    // Add length
+    NSData *extLength = [self encodeDERLength:extContent.length];
+    [extension appendData:extLength];
+    [extension appendData:extContent];
+    
+    return extension;
+}
+
+- (NSData *)createExtendedKeyUsageExtension {
+    NSMutableData *extension = [NSMutableData data];
+    
+    // SEQUENCE tag
+    [extension appendBytes:(uint8_t[]){0x30} length:1];
+    
+    NSMutableData *extContent = [NSMutableData data];
+    
+    // OID for extKeyUsage: 2.5.29.37
+    NSData *oid = [self encodeOID:@"2.5.29.37"];
+    [extContent appendData:oid];
+    
+    // Extension value (OCTET STRING containing SEQUENCE of OIDs)
+    NSMutableData *extValue = [NSMutableData data];
+    [extValue appendBytes:(uint8_t[]){0x04} length:1]; // OCTET STRING tag
+    
+    NSMutableData *oidSeq = [NSMutableData data];
+    [oidSeq appendBytes:(uint8_t[]){0x30} length:1]; // SEQUENCE tag
+    
+    // OID for clientAuth: 1.3.6.1.5.5.7.3.2
+    NSData *clientAuthOID = [self encodeOID:@"1.3.6.1.5.5.7.3.2"];
+    
+    NSData *oidSeqLength = [self encodeDERLength:clientAuthOID.length];
+    [oidSeq appendData:oidSeqLength];
+    [oidSeq appendData:clientAuthOID];
+    
+    NSData *extValueLength = [self encodeDERLength:oidSeq.length];
+    [extValue appendData:extValueLength];
+    [extValue appendData:oidSeq];
+    
+    [extContent appendData:extValue];
+    
+    // Add length
+    NSData *extLength = [self encodeDERLength:extContent.length];
+    [extension appendData:extLength];
+    [extension appendData:extContent];
+    
+    return extension;
+}
+
+- (NSData *)createSANExtensionWithIP:(NSString *)ipAddress phoneDeviceId:(NSString *)phoneDeviceId {
+    NSMutableData *extension = [NSMutableData data];
+    
+    // SEQUENCE tag
+    [extension appendBytes:(uint8_t[]){0x30} length:1];
+    
+    NSMutableData *extContent = [NSMutableData data];
+    
+    // OID for subjectAltName: 2.5.29.17
+    NSData *oid = [self encodeOID:@"2.5.29.17"];
+    [extContent appendData:oid];
+    
+    // Extension value (OCTET STRING containing GeneralNames SEQUENCE)
+    NSMutableData *extValue = [NSMutableData data];
+    [extValue appendBytes:(uint8_t[]){0x04} length:1]; // OCTET STRING tag
+    
+    // GeneralNames SEQUENCE
+    NSData *generalNames = [self createGeneralNames:ipAddress phoneDeviceId:phoneDeviceId];
+    
+    NSData *extValueLength = [self encodeDERLength:generalNames.length];
+    [extValue appendData:extValueLength];
+    [extValue appendData:generalNames];
+    
+    [extContent appendData:extValue];
+    
+    // Add length
+    NSData *extLength = [self encodeDERLength:extContent.length];
+    [extension appendData:extLength];
+    [extension appendData:extContent];
+    
+    return extension;
+}
+
+- (NSData *)createGeneralNames:(NSString *)ipAddress phoneDeviceId:(NSString *)phoneDeviceId {
+    NSMutableData *generalNames = [NSMutableData data];
+    
+    // SEQUENCE tag for GeneralNames
+    [generalNames appendBytes:(uint8_t[]){0x30} length:1];
+    
+    NSMutableData *generalNamesContent = [NSMutableData data];
+    
+    // Add IP Address if provided
+    if (ipAddress && ipAddress.length > 0) {
+        NSData *ipData = [self encodeIPAddress:ipAddress];
+        [generalNamesContent appendData:ipData];
+    }
+    
+    // Add otherName with phone device ID if provided
+    if (phoneDeviceId && phoneDeviceId.length > 0) {
+        NSData *otherNameData = [self encodeOtherName:phoneDeviceId];
+        [generalNamesContent appendData:otherNameData];
+    }
+    
+    // Add length
+    NSData *lengthData = [self encodeDERLength:generalNamesContent.length];
+    [generalNames appendData:lengthData];
+    [generalNames appendData:generalNamesContent];
+    
+    return generalNames;
+}
+
+- (NSData *)encodeIPAddress:(NSString *)ipAddress {
+    NSMutableData *ipData = [NSMutableData data];
+    
+    // [7] tag for IP Address
+    [ipData appendBytes:(uint8_t[]){0x87} length:1];
+    
+    // Parse IP address
+    NSArray *octets = [ipAddress componentsSeparatedByString:@"."];
+    if (octets.count == 4) {
+        // Length: 4 bytes
+        [ipData appendBytes:(uint8_t[]){0x04} length:1];
+        
+        // IP address bytes
+        for (NSString *octet in octets) {
+            uint8_t byte = (uint8_t)[octet intValue];
+            [ipData appendBytes:&byte length:1];
+        }
+    }
+    
+    return ipData;
+}
+
+- (NSData *)encodeOtherName:(NSString *)phoneDeviceId {
+    NSMutableData *otherNameData = [NSMutableData data];
+    
+    // [0] tag for otherName (context-specific, constructed)
+    [otherNameData appendBytes:(uint8_t[]){0xA0} length:1];
+    
+    NSMutableData *otherNameContent = [NSMutableData data];
+    
+    // SEQUENCE for otherName structure
+    [otherNameContent appendBytes:(uint8_t[]){0x30} length:1];
+    
+    NSMutableData *seqContent = [NSMutableData data];
+    
+    // OID for device info: 1.3.6.1.4.1.99999.1
+    NSData *oidData = [self encodeOID:@"1.3.6.1.4.1.99999.1"];
+    [seqContent appendData:oidData];
+    
+    // [0] EXPLICIT tag wrapper for the value
+    NSMutableData *valueWrapper = [NSMutableData data];
+    [valueWrapper appendBytes:(uint8_t[]){0xA0} length:1];
+    
+    NSMutableData *valueContent = [NSMutableData data];
+    
+    // UTF8String with phone device ID
+    [valueContent appendBytes:(uint8_t[]){0x0C} length:1];
+    
+    NSData *stringData = [phoneDeviceId dataUsingEncoding:NSUTF8StringEncoding];
+    NSData *stringLength = [self encodeDERLength:stringData.length];
+    [valueContent appendData:stringLength];
+    [valueContent appendData:stringData];
+    
+    // Add length for [0] EXPLICIT wrapper
+    NSData *valueWrapperLength = [self encodeDERLength:valueContent.length];
+    [valueWrapper appendData:valueWrapperLength];
+    [valueWrapper appendData:valueContent];
+    
+    [seqContent appendData:valueWrapper];
+    
+    // Add length for SEQUENCE
+    NSData *seqLength = [self encodeDERLength:seqContent.length];
+    [otherNameContent appendData:seqLength];
+    [otherNameContent appendData:seqContent];
+    
+    // Add length for [0] tag
+    NSData *otherNameLength = [self encodeDERLength:otherNameContent.length - 1];
+    [otherNameData appendData:otherNameLength];
+    [otherNameData appendData:[otherNameContent subdataWithRange:NSMakeRange(1, otherNameContent.length - 1)]];
+    
+    return otherNameData;
+}
+
+#pragma mark - Attributes
+
+- (NSData *)createAttributes:(NSData *)extensionsData {
+    NSMutableData *attributes = [NSMutableData data];
+    
+    // [0] tag for attributes (context-specific, constructed)
+    [attributes appendBytes:(uint8_t[]){0xA0} length:1];
+    
+    NSMutableData *attributesContent = [NSMutableData data];
+    
+    // SEQUENCE tag
+    [attributesContent appendBytes:(uint8_t[]){0x30} length:1];
+    
+    NSMutableData *seqContent = [NSMutableData data];
+    
+    // OID for extensionRequest: 1.2.840.113549.1.9.14
+    NSData *oid = [self encodeOID:@"1.2.840.113549.1.9.14"];
+    [seqContent appendData:oid];
+    
+    // SET tag
+    NSMutableData *setValue = [NSMutableData data];
+    [setValue appendBytes:(uint8_t[]){0x31} length:1];
+    
+    NSData *setLength = [self encodeDERLength:extensionsData.length];
+    [setValue appendData:setLength];
+    [setValue appendData:extensionsData];
+    
+    [seqContent appendData:setValue];
+    
+    // Add length for SEQUENCE
+    NSData *seqLength = [self encodeDERLength:seqContent.length];
+    [attributesContent appendData:seqLength];
+    [attributesContent appendData:seqContent];
+    
+    // Add length for [0] tag
+    NSData *attributesLength = [self encodeDERLength:attributesContent.length - 1];
+    [attributes appendData:attributesLength];
+    [attributes appendData:[attributesContent subdataWithRange:NSMakeRange(1, attributesContent.length - 1)]];
+    
+    return attributes;
+}
+
+#pragma mark - CertificationRequestInfo
+
+- (NSData *)createCertificationRequestInfo:(NSData *)subject
+                                       spki:(NSData *)spki
+                                 attributes:(NSData *)attributes {
+    NSMutableData *certRequestInfo = [NSMutableData data];
+    
+    // SEQUENCE tag
+    [certRequestInfo appendBytes:(uint8_t[]){0x30} length:1];
+    
+    NSMutableData *certRequestInfoContent = [NSMutableData data];
+    
+    // Version: 0
+    [certRequestInfoContent appendBytes:(uint8_t[]){0x02, 0x01, 0x00} length:3];
+    
+    // Subject
+    [certRequestInfoContent appendData:subject];
+    
+    // Subject Public Key Info
+    [certRequestInfoContent appendData:spki];
+    
+    // Attributes
+    [certRequestInfoContent appendData:attributes];
+    
+    // Add length
+    NSData *certRequestInfoLength = [self encodeDERLength:certRequestInfoContent.length];
+    [certRequestInfo appendData:certRequestInfoLength];
+    [certRequestInfo appendData:certRequestInfoContent];
+    
+    return certRequestInfo;
+}
+
+#pragma mark - Final CSR
+
+- (NSData *)buildFinalCSR:(NSData *)certRequestInfo signature:(NSData *)signature {
+    NSMutableData *csr = [NSMutableData data];
+    
+    // SEQUENCE tag
+    [csr appendBytes:(uint8_t[]){0x30} length:1];
+    
+    NSMutableData *csrContent = [NSMutableData data];
+    
+    // CertificationRequestInfo
+    [csrContent appendData:certRequestInfo];
+    
+    // Signature Algorithm Identifier
+    NSData *sigAlgId = [self createSignatureAlgorithmIdentifier];
+    [csrContent appendData:sigAlgId];
+    
+    // Signature (BIT STRING)
+    NSMutableData *signatureBitString = [NSMutableData data];
+    [signatureBitString appendBytes:(uint8_t[]){0x03} length:1]; // BIT STRING tag
+    
+    NSMutableData *bitStringContent = [NSMutableData data];
+    [bitStringContent appendBytes:(uint8_t[]){0x00} length:1]; // No unused bits
+    [bitStringContent appendData:signature];
+    
+    NSData *bitStringLength = [self encodeDERLength:bitStringContent.length];
+    [signatureBitString appendData:bitStringLength];
+    [signatureBitString appendData:bitStringContent];
+    
+    [csrContent appendData:signatureBitString];
+    
+    // Add length
+    NSData *csrLength = [self encodeDERLength:csrContent.length];
+    [csr appendData:csrLength];
+    [csr appendData:csrContent];
+    
+    return csr;
+}
+
+- (NSData *)createSignatureAlgorithmIdentifier {
+    NSMutableData *sigAlgId = [NSMutableData data];
+    
+    // SEQUENCE tag
+    [sigAlgId appendBytes:(uint8_t[]){0x30} length:1];
+    
+    NSMutableData *sigAlgIdContent = [NSMutableData data];
+    
+    // OID for ecdsa-with-SHA256: 1.2.840.10045.4.3.2
+    NSData *oid = [self encodeOID:@"1.2.840.10045.4.3.2"];
+    [sigAlgIdContent appendData:oid];
+    
+    // Add length
+    NSData *sigAlgIdLength = [self encodeDERLength:sigAlgIdContent.length];
+    [sigAlgId appendData:sigAlgIdLength];
+    [sigAlgId appendData:sigAlgIdContent];
+    
+    return sigAlgId;
+}
+
+#pragma mark - Utility Methods
+
+- (NSData *)encodeOID:(NSString *)oid {
     NSMutableData *oidData = [NSMutableData data];
     
-    // First two components are encoded as 40*first + second
-    unsigned char firstByte = [components[0] intValue] * 40 + [components[1] intValue];
-    [oidData appendBytes:&firstByte length:1];
+    // OID tag
+    [oidData appendBytes:(uint8_t[]){0x06} length:1];
+    
+    NSArray *components = [oid componentsSeparatedByString:@"."];
+    NSMutableData *oidBytes = [NSMutableData data];
+    
+    // First two components encoded as: 40 * first + second
+    NSInteger first = [components[0] integerValue];
+    NSInteger second = [components[1] integerValue];
+    uint8_t firstByte = (uint8_t)(40 * first + second);
+    [oidBytes appendBytes:&firstByte length:1];
     
     // Remaining components
     for (NSInteger i = 2; i < components.count; i++) {
         NSInteger value = [components[i] integerValue];
         NSData *encoded = [self encodeOIDComponent:value];
-        [oidData appendData:encoded];
+        [oidBytes appendData:encoded];
     }
     
-    // Add tag and length
-    NSMutableData *result = [NSMutableData data];
-    unsigned char tag = 0x06; // OID
-    [result appendBytes:&tag length:1];
-    [result appendData:[self encodeLength:oidData.length]];
-    [result appendData:oidData];
+    // Add length
+    uint8_t length = (uint8_t)oidBytes.length;
+    [oidData appendBytes:&length length:1];
+    [oidData appendData:oidBytes];
     
-    return result;
+    return oidData;
 }
 
 - (NSData *)encodeOIDComponent:(NSInteger)value {
     NSMutableData *data = [NSMutableData data];
     
     if (value < 128) {
-        unsigned char byte = (unsigned char)value;
+        uint8_t byte = (uint8_t)value;
         [data appendBytes:&byte length:1];
     } else {
-        // Encode in base 128
         NSMutableArray *bytes = [NSMutableArray array];
         while (value > 0) {
             [bytes insertObject:@(value & 0x7F) atIndex:0];
@@ -750,9 +802,9 @@ RCT_EXPORT_METHOD(getPublicKey:(NSString *)privateKeyAlias
         }
         
         for (NSInteger i = 0; i < bytes.count; i++) {
-            unsigned char byte = [bytes[i] unsignedCharValue];
+            uint8_t byte = [bytes[i] unsignedCharValue];
             if (i < bytes.count - 1) {
-                byte |= 0x80; // Set continuation bit
+                byte |= 0x80; // Set high bit for all but last byte
             }
             [data appendBytes:&byte length:1];
         }
@@ -761,120 +813,41 @@ RCT_EXPORT_METHOD(getPublicKey:(NSString *)privateKeyAlias
     return data;
 }
 
-// ⭐️ CRITICAL FIX: Match Android's exact encoding
-// Country (C) and serialNumber use PrintableString (0x13)
-// All other DN fields (ST, L, O, OU, CN) use UTF8String (0x0C)
-- (NSData *)encodePrintableString:(NSString *)string {
-    // Convert string to ASCII data (PrintableString uses ASCII subset)
-    NSData *stringData = [string dataUsingEncoding:NSASCIIStringEncoding];
-    NSMutableData *result = [NSMutableData data];
-    
-    unsigned char tag = 0x13; // PrintableString tag (NOT 0x0C UTF8String)
-    [result appendBytes:&tag length:1];
-    [result appendData:[self encodeLength:stringData.length]];
-    [result appendData:stringData];
-    
-    return result;
-}
-
-- (NSData *)encodeUTF8String:(NSString *)string {
-    NSData *stringData = [string dataUsingEncoding:NSUTF8StringEncoding];
-    NSMutableData *result = [NSMutableData data];
-    
-    unsigned char tag = 0x0C; // UTF8String
-    [result appendBytes:&tag length:1];
-    [result appendData:[self encodeLength:stringData.length]];
-    [result appendData:stringData];
-    
-    return result;
-}
-
-- (NSData *)encodeOctetString:(NSData *)data {
-    NSMutableData *result = [NSMutableData data];
-    unsigned char tag = 0x04; // OCTET STRING
-    [result appendBytes:&tag length:1];
-    [result appendData:[self encodeLength:data.length]];
-    [result appendData:data];
-    return result;
-}
-
-- (NSData *)encodeBitString:(NSData *)data {
-    NSMutableData *result = [NSMutableData data];
-    unsigned char tag = 0x03; // BIT STRING
-    unsigned char unusedBits = 0x00;
-    
-    [result appendBytes:&tag length:1];
-    [result appendData:[self encodeLength:data.length + 1]];
-    [result appendBytes:&unusedBits length:1];
-    [result appendData:data];
-    
-    return result;
-}
-
-- (NSData *)wrapInSequence:(NSData *)data {
-    NSMutableData *result = [NSMutableData data];
-    unsigned char tag = 0x30; // SEQUENCE
-    [result appendBytes:&tag length:1];
-    [result appendData:[self encodeLength:data.length]];
-    [result appendData:data];
-    return result;
-}
-
-- (NSData *)wrapInSet:(NSData *)data {
-    NSMutableData *result = [NSMutableData data];
-    unsigned char tag = 0x31; // SET
-    [result appendBytes:&tag length:1];
-    [result appendData:[self encodeLength:data.length]];
-    [result appendData:data];
-    return result;
-}
-
-- (NSData *)wrapInContext:(NSData *)data tag:(unsigned char)contextTag {
-    NSMutableData *result = [NSMutableData data];
-    unsigned char tag = 0xA0 | contextTag; // CONTEXT SPECIFIC
-    [result appendBytes:&tag length:1];
-    [result appendData:[self encodeLength:data.length]];
-    [result appendData:data];
-    return result;
-}
-
-- (NSData *)encodeLength:(NSUInteger)length {
-    NSMutableData *result = [NSMutableData data];
+- (NSData *)encodeDERLength:(NSUInteger)length {
+    NSMutableData *data = [NSMutableData data];
     
     if (length < 128) {
-        unsigned char byte = (unsigned char)length;
-        [result appendBytes:&byte length:1];
+        uint8_t byte = (uint8_t)length;
+        [data appendBytes:&byte length:1];
     } else {
-        // Long form
-        NSMutableArray *bytes = [NSMutableArray array];
+        NSMutableData *lengthBytes = [NSMutableData data];
         NSUInteger temp = length;
         while (temp > 0) {
-            [bytes insertObject:@(temp & 0xFF) atIndex:0];
+            uint8_t byte = (uint8_t)(temp & 0xFF);
+            [lengthBytes replaceBytesInRange:NSMakeRange(0, 0) withBytes:&byte length:1];
             temp >>= 8;
         }
         
-        unsigned char firstByte = 0x80 | bytes.count;
-        [result appendBytes:&firstByte length:1];
-        
-        for (NSNumber *byte in bytes) {
-            unsigned char b = [byte unsignedCharValue];
-            [result appendBytes:&b length:1];
-        }
+        uint8_t firstByte = 0x80 | (uint8_t)lengthBytes.length;
+        [data appendBytes:&firstByte length:1];
+        [data appendData:lengthBytes];
     }
     
-    return result;
+    return data;
 }
 
-#pragma mark - PEM Conversion
-
-- (NSString *)convertToPEM:(NSData *)data label:(NSString *)label {
-    NSString *base64 = [data base64EncodedStringWithOptions:NSDataBase64Encoding64CharacterLineLength];
+- (NSString *)convertToPEM:(NSData *)derData {
+    NSString *base64 = [derData base64EncodedStringWithOptions:NSDataBase64Encoding64CharacterLineLength];
     
-    // Remove \r characters to match standard Unix-style line endings
-    base64 = [base64 stringByReplacingOccurrencesOfString:@"\r" withString:@""];
+    NSMutableString *pem = [NSMutableString string];
+    [pem appendString:@"-----BEGIN CERTIFICATE REQUEST-----\n"];
+    [pem appendString:base64];
+    if (![base64 hasSuffix:@"\n"]) {
+        [pem appendString:@"\n"];
+    }
+    [pem appendString:@"-----END CERTIFICATE REQUEST-----\n"];
     
-    return [NSString stringWithFormat:@"-----BEGIN %@-----\n%@\n-----END %@-----",
-            label, base64, label];
+    return pem;
 }
 
 @end

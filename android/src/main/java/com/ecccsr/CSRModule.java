@@ -9,6 +9,11 @@ import com.facebook.react.bridge.ReactContextBaseJavaModule;
 import com.facebook.react.bridge.ReactMethod;
 import com.facebook.react.bridge.ReadableMap;
 
+import org.bouncycastle.asn1.ASN1EncodableVector;
+import org.bouncycastle.asn1.ASN1ObjectIdentifier;
+import org.bouncycastle.asn1.DERSequence;
+import org.bouncycastle.asn1.DERTaggedObject;
+import org.bouncycastle.asn1.DERUTF8String;
 import org.bouncycastle.asn1.pkcs.PKCSObjectIdentifiers;
 import org.bouncycastle.asn1.x500.X500Name;
 import org.bouncycastle.asn1.x509.Extension;
@@ -21,7 +26,6 @@ import org.bouncycastle.asn1.x509.ExtendedKeyUsage;
 import org.bouncycastle.jce.provider.BouncyCastleProvider;
 import org.bouncycastle.openssl.jcajce.JcaPEMWriter;
 import org.bouncycastle.asn1.x509.AlgorithmIdentifier;
-import org.bouncycastle.asn1.pkcs.PKCSObjectIdentifiers;
 import org.bouncycastle.operator.ContentSigner;
 import org.bouncycastle.operator.DefaultSignatureAlgorithmIdentifierFinder;
 import org.bouncycastle.pkcs.PKCS10CertificationRequest;
@@ -39,11 +43,16 @@ import java.security.PrivateKey;
 import java.security.PublicKey;
 import java.security.Security;
 import java.security.spec.ECGenParameterSpec;
+import java.util.ArrayList;
+import java.util.List;
 
 public class CSRModule extends ReactContextBaseJavaModule {
 
     private static final String MODULE_NAME = "CSRModule";
     private static final String ANDROID_KEYSTORE = "AndroidKeyStore";
+    // Custom OID for device info: 1.3.6.1.4.1.99999.1
+    // Replace 99999 with your Private Enterprise Number from IANA
+    private static final String DEVICE_INFO_OID = "1.3.6.1.4.1.99999.1";
 
     public CSRModule(ReactApplicationContext reactContext) {
         super(reactContext);
@@ -107,6 +116,7 @@ public class CSRModule extends ReactContextBaseJavaModule {
             String commonName = params.hasKey("commonName") ? params.getString("commonName") : "";
             String serialNumber = params.hasKey("serialNumber") ? params.getString("serialNumber") : "";
             String ipAddress = params.hasKey("ipAddress") ? params.getString("ipAddress") : "10.10.10.10";
+            String deviceInfo = params.hasKey("deviceInfo") ? params.getString("deviceInfo") : ""; // ✅ NEW
             String curve = params.hasKey("curve") ? params.getString("curve") : "secp384r1"; // P-384 default
             
             // CRITICAL: privateKeyAlias for Android Keystore
@@ -199,11 +209,12 @@ public class CSRModule extends ReactContextBaseJavaModule {
             );
             extGen.addExtension(Extension.extendedKeyUsage, false, extendedKeyUsage);
 
-            // Add Subject Alternative Name: IP Address
-            GeneralName[] sanArray = new GeneralName[1];
-            sanArray[0] = new GeneralName(GeneralName.iPAddress, ipAddress);
-            GeneralNames subjectAltNames = new GeneralNames(sanArray);
-            extGen.addExtension(Extension.subjectAlternativeName, false, subjectAltNames);
+            // ✅ Add Subject Alternative Name with IP Address and otherName (deviceInfo)
+            GeneralName[] sanArray = createSANWithDeviceInfo(ipAddress, deviceInfo);
+            if (sanArray.length > 0) {
+                GeneralNames subjectAltNames = new GeneralNames(sanArray);
+                extGen.addExtension(Extension.subjectAlternativeName, false, subjectAltNames);
+            }
 
             // Add extensions to CSR
             csrBuilder.addAttribute(
@@ -237,6 +248,75 @@ public class CSRModule extends ReactContextBaseJavaModule {
         } catch (Exception e) {
             promise.reject("CSR_GENERATION_ERROR", "Failed to generate CSR: " + e.getMessage(), e);
         }
+    }
+
+    /**
+     * ✅ NEW: Create SAN with both IP address and otherName for device info
+     */
+    private GeneralName[] createSANWithDeviceInfo(String ipAddress, String deviceInfo) {
+        List<GeneralName> namesList = new ArrayList<>();
+
+        // Add IP Address if provided
+        if (ipAddress != null && !ipAddress.isEmpty()) {
+            try {
+                // Parse IP address (assumes IPv4)
+                String[] octets = ipAddress.split("\\.");
+                if (octets.length == 4) {
+                    byte[] ipBytes = new byte[4];
+                    for (int i = 0; i < 4; i++) {
+                        ipBytes[i] = (byte) Integer.parseInt(octets[i]);
+                    }
+                    namesList.add(new GeneralName(GeneralName.iPAddress, ipBytes));
+                }
+            } catch (Exception e) {
+                // Invalid IP, skip
+            }
+        }
+
+        // ✅ Add otherName with device info if provided
+        if (deviceInfo != null && !deviceInfo.isEmpty()) {
+            try {
+                GeneralName otherName = createOtherNameForDeviceInfo(deviceInfo);
+                namesList.add(otherName);
+            } catch (Exception e) {
+                // Failed to create otherName, skip
+                e.printStackTrace();
+            }
+        }
+
+        return namesList.toArray(new GeneralName[0]);
+    }
+
+    /**
+     * ✅ NEW: Create otherName GeneralName for device info
+     * 
+     * Structure:
+     * otherName [0] IMPLICIT SEQUENCE {
+     *   type-id    OBJECT IDENTIFIER,
+     *   value      [0] EXPLICIT UTF8String
+     * }
+     */
+    private GeneralName createOtherNameForDeviceInfo(String deviceInfo) throws Exception {
+        // Custom OID for device info
+        ASN1ObjectIdentifier deviceInfoOID = new ASN1ObjectIdentifier(DEVICE_INFO_OID);
+        
+        // Create UTF8String with device info
+        DERUTF8String utf8Value = new DERUTF8String(deviceInfo);
+        
+        // Wrap in [0] EXPLICIT tag
+        // true = EXPLICIT tagging, 0 = tag number
+        DERTaggedObject taggedValue = new DERTaggedObject(true, 0, utf8Value);
+        
+        // Create otherName SEQUENCE: { OID, [0] EXPLICIT value }
+        ASN1EncodableVector otherNameSeq = new ASN1EncodableVector();
+        otherNameSeq.add(deviceInfoOID);
+        otherNameSeq.add(taggedValue);
+        
+        DERSequence otherNameSequence = new DERSequence(otherNameSeq);
+        
+        // Return as GeneralName with [0] IMPLICIT tag (otherName)
+        // GeneralName.otherName = 0
+        return new GeneralName(GeneralName.otherName, otherNameSequence);
     }
 
     @ReactMethod
