@@ -236,7 +236,6 @@ RCT_EXPORT_METHOD(generateCSR:(NSString *)commonName
 
 - (NSData *)createSubjectFromDN:(NSString *)dn {
     NSLog(@"[CSR] createSubjectFromDN called with: %@", dn);
-    // Parse DN string and create ASN.1 structure
     NSMutableData *subjectData = [NSMutableData data];
     
     // SEQUENCE tag
@@ -485,8 +484,7 @@ RCT_EXPORT_METHOD(generateCSR:(NSString *)commonName
     [extValue appendBytes:(uint8_t[]){0x04} length:1]; // OCTET STRING tag
     
     // BIT STRING with keyUsage flags
-    // digitalSignature (0) and keyAgreement (4) = 10010000 reversed = 00001001 = 0x09
-    uint8_t bitStringValue[] = {0x03, 0x02, 0x05, 0x88}; // BIT STRING, length 2, 5 unused bits, 0x88
+    uint8_t bitStringValue[] = {0x03, 0x02, 0x05, 0x88};
     NSData *bitStringLength = [self encodeDERLength:sizeof(bitStringValue)];
     [extValue appendData:bitStringLength];
     [extValue appendBytes:bitStringValue length:sizeof(bitStringValue)];
@@ -646,7 +644,6 @@ RCT_EXPORT_METHOD(generateCSR:(NSString *)commonName
     NSMutableData *seqContent = [NSMutableData data];
     
     // OID for device info: 1.3.6.1.4.1.99999.1
-    // Replace 99999 with your Private Enterprise Number from IANA
     NSData *oidData = [self encodeOID:@"1.3.6.1.4.1.99999.1"];
     [seqContent appendData:oidData];
     
@@ -919,14 +916,3 @@ RCT_EXPORT_METHOD(generateCSR:(NSString *)commonName
 }
 
 @end
-```
-
-Now run your app and check the Xcode console. You'll see detailed logs like:
-```
-[CSR] Starting CSR generation...
-[CSR] Parameters - CN: device-001, Serial: SERIAL-123, Curve: P-384
-[CSR] DeviceInfo: abc123|Apple_iPhone14
-[CSR] Key size: 384
-[CSR] Generating key pair...
-[CSR] Key pair generated successfully
-...
