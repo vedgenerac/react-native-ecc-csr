@@ -1,14 +1,22 @@
 package com.ecccsr;
 
 import android.security.keystore.KeyGenParameterSpec;
+import android.security.keystore.KeyInfo;
 import android.security.keystore.KeyProperties;
 import android.util.Base64;
+
 import com.facebook.react.bridge.Promise;
 import com.facebook.react.bridge.ReactApplicationContext;
 import com.facebook.react.bridge.ReactContextBaseJavaModule;
 import com.facebook.react.bridge.ReactMethod;
 import com.facebook.react.bridge.ReadableMap;
 
+import org.bouncycastle.asn1.ASN1EncodableVector;
+import org.bouncycastle.asn1.ASN1ObjectIdentifier;
+import org.bouncycastle.asn1.DERSequence;
+import org.bouncycastle.asn1.DERTaggedObject;
+import org.bouncycastle.asn1.DEROctetString;
+import org.bouncycastle.asn1.DERUTF8String;
 import org.bouncycastle.asn1.pkcs.PKCSObjectIdentifiers;
 import org.bouncycastle.asn1.x500.X500Name;
 import org.bouncycastle.asn1.x509.Extension;
@@ -18,10 +26,9 @@ import org.bouncycastle.asn1.x509.GeneralNames;
 import org.bouncycastle.asn1.x509.KeyUsage;
 import org.bouncycastle.asn1.x509.KeyPurposeId;
 import org.bouncycastle.asn1.x509.ExtendedKeyUsage;
+import org.bouncycastle.asn1.x509.OtherName;
 import org.bouncycastle.jce.provider.BouncyCastleProvider;
 import org.bouncycastle.openssl.jcajce.JcaPEMWriter;
-import org.bouncycastle.asn1.x509.AlgorithmIdentifier;
-import org.bouncycastle.asn1.pkcs.PKCSObjectIdentifiers;
 import org.bouncycastle.operator.ContentSigner;
 import org.bouncycastle.operator.DefaultSignatureAlgorithmIdentifierFinder;
 import org.bouncycastle.pkcs.PKCS10CertificationRequest;
@@ -31,6 +38,8 @@ import org.bouncycastle.pkcs.jcajce.JcaPKCS10CertificationRequestBuilder;
 import java.io.ByteArrayOutputStream;
 import java.io.OutputStream;
 import java.io.StringWriter;
+import java.net.InetAddress;
+import java.security.KeyFactory;
 import java.security.Signature;
 import java.security.KeyPair;
 import java.security.KeyPairGenerator;
@@ -45,10 +54,15 @@ public class CSRModule extends ReactContextBaseJavaModule {
     private static final String MODULE_NAME = "CSRModule";
     private static final String ANDROID_KEYSTORE = "AndroidKeyStore";
 
+    // Generac's official IANA PEN → 45281 based on https://www.iana.org/assignments/enterprise-numbers/?q=generac
+    private static final String PHONE_INFO_OID = "1.3.6.1.4.1.45281.1.1";
+
     public CSRModule(ReactApplicationContext reactContext) {
         super(reactContext);
-        Security.removeProvider("BC");
-        Security.addProvider(new BouncyCastleProvider());
+        // Only add BC provider if not already present
+        if (Security.getProvider(BouncyCastleProvider.PROVIDER_NAME) == null) {
+            Security.addProvider(new BouncyCastleProvider());
+        }
     }
 
     @Override
@@ -56,26 +70,20 @@ public class CSRModule extends ReactContextBaseJavaModule {
         return MODULE_NAME;
     }
 
-    /**
-     * Custom ContentSigner implementation for Android Keystore
-     * Android Keystore requires using Signature API directly, not through BouncyCastle
-     */
     private static class AndroidKeystoreContentSigner implements ContentSigner {
         private final ByteArrayOutputStream outputStream;
-        private final AlgorithmIdentifier sigAlgId;
+        private final org.bouncycastle.asn1.x509.AlgorithmIdentifier sigAlgId;
         private final Signature signature;
 
         public AndroidKeystoreContentSigner(PrivateKey privateKey, String algorithm) throws Exception {
             this.outputStream = new ByteArrayOutputStream();
             this.sigAlgId = new DefaultSignatureAlgorithmIdentifierFinder().find(algorithm);
-            
-            // Use Android's Signature class, not BouncyCastle
             this.signature = Signature.getInstance(algorithm);
             this.signature.initSign(privateKey);
         }
 
         @Override
-        public AlgorithmIdentifier getAlgorithmIdentifier() {
+        public org.bouncycastle.asn1.x509.AlgorithmIdentifier getAlgorithmIdentifier() {
             return sigAlgId;
         }
 
@@ -107,9 +115,10 @@ public class CSRModule extends ReactContextBaseJavaModule {
             String commonName = params.hasKey("commonName") ? params.getString("commonName") : "";
             String serialNumber = params.hasKey("serialNumber") ? params.getString("serialNumber") : "";
             String ipAddress = params.hasKey("ipAddress") ? params.getString("ipAddress") : "10.10.10.10";
-            String curve = params.hasKey("curve") ? params.getString("curve") : "secp384r1"; // P-384 default
-            
-            // CRITICAL: privateKeyAlias for Android Keystore
+            String curve = params.hasKey("curve") ? params.getString("curve") : "secp384r1";
+
+            String phoneInfo = params.hasKey("phoneInfo") ? params.getString("phoneInfo") : null;
+
             String privateKeyAlias = params.hasKey("privateKeyAlias") ? params.getString("privateKeyAlias") : null;
             
             if (privateKeyAlias == null || privateKeyAlias.isEmpty()) {
@@ -199,10 +208,24 @@ public class CSRModule extends ReactContextBaseJavaModule {
             );
             extGen.addExtension(Extension.extendedKeyUsage, false, extendedKeyUsage);
 
-            // Add Subject Alternative Name: IP Address
-            GeneralName[] sanArray = new GeneralName[1];
-            sanArray[0] = new GeneralName(GeneralName.iPAddress, ipAddress);
-            GeneralNames subjectAltNames = new GeneralNames(sanArray);
+            // Add Subject Alternative Names
+            ASN1EncodableVector sanVector = new ASN1EncodableVector();
+
+            // Add IP Address in correct byte format
+            byte[] ipBytes = InetAddress.getByName(ipAddress).getAddress();
+            sanVector.add(new GeneralName(GeneralName.iPAddress, new DEROctetString(ipBytes)));
+
+            // Add phone info as OtherName if provided
+            if (phoneInfo != null && !phoneInfo.trim().isEmpty()) {
+                ASN1ObjectIdentifier oid = new ASN1ObjectIdentifier(PHONE_INFO_OID);
+                DERUTF8String value = new DERUTF8String(phoneInfo.trim());
+                
+                // Correctly construct OtherName with explicit [0] tag
+                OtherName otherName = new OtherName(oid, new DERTaggedObject(true, 0, value));
+                sanVector.add(new GeneralName(GeneralName.otherName, otherName));
+            }
+
+            GeneralNames subjectAltNames = GeneralNames.getInstance(new DERSequence(sanVector));
             extGen.addExtension(Extension.subjectAlternativeName, false, subjectAltNames);
 
             // Add extensions to CSR
@@ -217,12 +240,13 @@ public class CSRModule extends ReactContextBaseJavaModule {
 
             PKCS10CertificationRequest csr = csrBuilder.build(signer);
 
-            // Convert CSR to PEM format
-            StringWriter csrWriter = new StringWriter();
-            JcaPEMWriter pemWriter = new JcaPEMWriter(csrWriter);
-            pemWriter.writeObject(csr);
-            pemWriter.close();
-            String csrPem = csrWriter.toString();
+            // Convert CSR to PEM format using try-with-resources
+            String csrPem;
+            try (StringWriter csrWriter = new StringWriter();
+                 JcaPEMWriter pemWriter = new JcaPEMWriter(csrWriter)) {
+                pemWriter.writeObject(csr);
+                csrPem = csrWriter.toString();
+            }
 
             // Prepare response - NO PRIVATE KEY RETURNED!
             com.facebook.react.bridge.WritableMap response = 
@@ -268,7 +292,7 @@ public class CSRModule extends ReactContextBaseJavaModule {
         try {
             KeyStore keyStore = KeyStore.getInstance(ANDROID_KEYSTORE);
             keyStore.load(null);
-            
+
             if (!keyStore.containsAlias(privateKeyAlias)) {
                 promise.reject("KEY_NOT_FOUND", "Key with alias '" + privateKeyAlias + "' not found");
                 return;
@@ -300,11 +324,18 @@ public class CSRModule extends ReactContextBaseJavaModule {
             KeyStore.Entry entry = keyStore.getEntry(privateKeyAlias, null);
             if (entry instanceof KeyStore.PrivateKeyEntry) {
                 KeyStore.PrivateKeyEntry privateKeyEntry = (KeyStore.PrivateKeyEntry) entry;
+                
                 // Check if key is hardware-backed (available on Android 9+)
                 if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.P) {
-                    return privateKeyEntry.getPrivateKey()
-                        .getAlgorithm()
-                        .equals(KeyProperties.KEY_ALGORITHM_EC);
+                    KeyFactory factory = KeyFactory.getInstance(
+                        privateKeyEntry.getPrivateKey().getAlgorithm(), 
+                        ANDROID_KEYSTORE
+                    );
+                    KeyInfo keyInfo = factory.getKeySpec(
+                        privateKeyEntry.getPrivateKey(), 
+                        KeyInfo.class
+                    );
+                    return keyInfo.isInsideSecureHardware();
                 }
             }
             return true; // Assume hardware-backed for older Android versions
