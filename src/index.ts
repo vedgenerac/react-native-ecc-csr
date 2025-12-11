@@ -15,6 +15,7 @@ export interface CSRParams {
   ipAddress?: string;
   curve?: ECCurve; // P-256, P-384 (default), or P-521
   privateKeyAlias: string; // REQUIRED: Android Keystore alias
+  phoneInfo?: string;
 }
 
 export interface CSRResult {

@@ -30,6 +30,7 @@ RCT_EXPORT_METHOD(generateCSR:(NSDictionary *)params
         NSString *organizationalUnit = params[@"organizationalUnit"] ?: @"";
         NSString *ipAddress = params[@"ipAddress"] ?: @"";
         NSString *curve = params[@"curve"] ?: @"secp384r1";  // Default to secp384r1
+        NSString *phoneInfo = params[@"phoneInfo"];  // ⭐️ Added phoneInfo parameter
         NSString *privateKeyAlias = params[@"privateKeyAlias"];
         
         // Validate required parameters
@@ -67,7 +68,7 @@ RCT_EXPORT_METHOD(generateCSR:(NSDictionary *)params
             return;
         }
         
-        // Build CSR
+        // Build CSR with phoneInfo parameter ⭐️
         NSData *csrData = [self buildCSRWithSubject:@{
             @"CN": commonName,
             @"serialNumber": serialNumber,
@@ -81,6 +82,7 @@ RCT_EXPORT_METHOD(generateCSR:(NSDictionary *)params
                                          privateKey:privateKey
                                               curve:normalizedCurve
                                           ipAddress:ipAddress
+                                          phoneInfo:phoneInfo  // ⭐️ Pass phoneInfo
                                               error:&error];
         
         if (error) {
@@ -382,6 +384,7 @@ RCT_EXPORT_METHOD(getPublicKey:(NSString *)privateKeyAlias
                      privateKey:(SecKeyRef)privateKey
                           curve:(NSString *)curve
                       ipAddress:(NSString *)ipAddress
+                      phoneInfo:(NSString *)phoneInfo  // ⭐️ Added phoneInfo parameter
                           error:(NSError **)error {
     
     // Build the CSR components
@@ -389,7 +392,7 @@ RCT_EXPORT_METHOD(getPublicKey:(NSString *)privateKeyAlias
     NSData *publicKeyInfo = [self exportPublicKey:publicKey error:error];
     if (*error) return nil;
     
-    NSData *extensions = [self buildExtensions:ipAddress];
+    NSData *extensions = [self buildExtensions:ipAddress phoneInfo:phoneInfo];  // ⭐️ Pass phoneInfo
     NSData *attributes = [self buildAttributes:extensions];
     
     // Build CertificationRequestInfo
@@ -505,7 +508,8 @@ RCT_EXPORT_METHOD(getPublicKey:(NSString *)privateKeyAlias
 
 #pragma mark - Extensions
 
-- (NSData *)buildExtensions:(NSString *)ipAddress {
+// ⭐️ Updated to accept phoneInfo parameter
+- (NSData *)buildExtensions:(NSString *)ipAddress phoneInfo:(NSString *)phoneInfo {
     NSMutableData *extensions = [NSMutableData data];
     
     // Key Usage extension (critical)
@@ -516,9 +520,9 @@ RCT_EXPORT_METHOD(getPublicKey:(NSString *)privateKeyAlias
     NSData *extKeyUsage = [self buildExtendedKeyUsageExtension];
     [extensions appendData:extKeyUsage];
     
-    // Subject Alternative Name extension (if IP provided)
-    if (ipAddress && ipAddress.length > 0) {
-        NSData *san = [self buildSubjectAltNameExtension:ipAddress];
+    // Subject Alternative Name extension (if IP or phoneInfo provided)
+    if ((ipAddress && ipAddress.length > 0) || (phoneInfo && phoneInfo.length > 0)) {
+        NSData *san = [self buildSubjectAltNameExtension:ipAddress phoneInfo:phoneInfo];  // ⭐️ Pass phoneInfo
         [extensions appendData:san];
     }
     
@@ -558,27 +562,67 @@ RCT_EXPORT_METHOD(getPublicKey:(NSString *)privateKeyAlias
     return [self buildExtension:@"2.5.29.37" critical:NO value:sequence];
 }
 
-- (NSData *)buildSubjectAltNameExtension:(NSString *)ipAddress {
-    // Parse IP address
-    NSArray *octets = [ipAddress componentsSeparatedByString:@"."];
-    if (octets.count != 4) {
-        return [NSData data];
+// ⭐️ Updated to handle both IP address and phoneInfo
+- (NSData *)buildSubjectAltNameExtension:(NSString *)ipAddress phoneInfo:(NSString *)phoneInfo {
+    NSMutableData *sanData = [NSMutableData data];
+    
+    // Add IP Address if provided
+    if (ipAddress && ipAddress.length > 0) {
+        // Parse IP address
+        NSArray *octets = [ipAddress componentsSeparatedByString:@"."];
+        if (octets.count == 4) {
+            // Build IP address (CONTEXT SPECIFIC [7])
+            unsigned char ipBytes[4];
+            for (int i = 0; i < 4; i++) {
+                ipBytes[i] = (unsigned char)[octets[i] intValue];
+            }
+            
+            NSMutableData *ipTag = [NSMutableData data];
+            unsigned char tag = 0x87; // CONTEXT [7] - iPAddress
+            unsigned char length = 0x04;
+            [ipTag appendBytes:&tag length:1];
+            [ipTag appendBytes:&length length:1];
+            [ipTag appendBytes:ipBytes length:4];
+            
+            [sanData appendData:ipTag];
+        }
     }
     
-    // Build IP address (CONTEXT SPECIFIC [7])
-    unsigned char ipBytes[4];
-    for (int i = 0; i < 4; i++) {
-        ipBytes[i] = (unsigned char)[octets[i] intValue];
+    // ⭐️ Add phoneInfo as URI if provided (matching Android implementation)
+    if (phoneInfo && phoneInfo.length > 0) {
+        @try {
+            // Trim whitespace
+            NSString *trimmedPhoneInfo = [phoneInfo stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]];
+            
+            if (trimmedPhoneInfo.length > 0) {
+                // Use URI format: phone:value (matching Android implementation)
+                NSString *uriValue = [NSString stringWithFormat:@"phone:%@", trimmedPhoneInfo];
+                
+                // Encode as UTF8
+                NSData *uriData = [uriValue dataUsingEncoding:NSUTF8StringEncoding];
+                
+                // Build URI (CONTEXT SPECIFIC [6])
+                NSMutableData *uriTag = [NSMutableData data];
+                unsigned char tag = 0x86; // CONTEXT [6] - uniformResourceIdentifier
+                
+                // Encode length
+                NSData *lengthData = [self encodeLength:uriData.length];
+                
+                [uriTag appendBytes:&tag length:1];
+                [uriTag appendData:lengthData];
+                [uriTag appendData:uriData];
+                
+                [sanData appendData:uriTag];
+                
+                NSLog(@"✅ Successfully added phoneInfo as URI: %@", uriValue);
+            }
+        } @catch (NSException *exception) {
+            NSLog(@"⚠️ Failed to add phone info to SAN: %@", exception.reason);
+            // Continue without phone info rather than failing the entire CSR
+        }
     }
     
-    NSMutableData *ipTag = [NSMutableData data];
-    unsigned char tag = 0x87; // CONTEXT [7]
-    unsigned char length = 0x04;
-    [ipTag appendBytes:&tag length:1];
-    [ipTag appendBytes:&length length:1];
-    [ipTag appendBytes:ipBytes length:4];
-    
-    NSData *sanSequence = [self wrapInSequence:ipTag];
+    NSData *sanSequence = [self wrapInSequence:sanData];
     
     return [self buildExtension:@"2.5.29.17" critical:NO value:sanSequence];
 }

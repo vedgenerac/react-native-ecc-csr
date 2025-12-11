@@ -1,8 +1,10 @@
 package com.ecccsr;
 
 import android.security.keystore.KeyGenParameterSpec;
+import android.security.keystore.KeyInfo;
 import android.security.keystore.KeyProperties;
 import android.util.Base64;
+import android.util.Log;
 import com.facebook.react.bridge.Promise;
 import com.facebook.react.bridge.ReactApplicationContext;
 import com.facebook.react.bridge.ReactContextBaseJavaModule;
@@ -21,7 +23,6 @@ import org.bouncycastle.asn1.x509.ExtendedKeyUsage;
 import org.bouncycastle.jce.provider.BouncyCastleProvider;
 import org.bouncycastle.openssl.jcajce.JcaPEMWriter;
 import org.bouncycastle.asn1.x509.AlgorithmIdentifier;
-import org.bouncycastle.asn1.pkcs.PKCSObjectIdentifiers;
 import org.bouncycastle.operator.ContentSigner;
 import org.bouncycastle.operator.DefaultSignatureAlgorithmIdentifierFinder;
 import org.bouncycastle.pkcs.PKCS10CertificationRequest;
@@ -31,6 +32,7 @@ import org.bouncycastle.pkcs.jcajce.JcaPKCS10CertificationRequestBuilder;
 import java.io.ByteArrayOutputStream;
 import java.io.OutputStream;
 import java.io.StringWriter;
+import java.security.KeyFactory;
 import java.security.Signature;
 import java.security.KeyPair;
 import java.security.KeyPairGenerator;
@@ -39,6 +41,8 @@ import java.security.PrivateKey;
 import java.security.PublicKey;
 import java.security.Security;
 import java.security.spec.ECGenParameterSpec;
+import java.util.ArrayList;
+import java.util.List;
 
 public class CSRModule extends ReactContextBaseJavaModule {
 
@@ -47,8 +51,10 @@ public class CSRModule extends ReactContextBaseJavaModule {
 
     public CSRModule(ReactApplicationContext reactContext) {
         super(reactContext);
-        Security.removeProvider("BC");
-        Security.addProvider(new BouncyCastleProvider());
+        // Only add BC provider if not already present
+        if (Security.getProvider(BouncyCastleProvider.PROVIDER_NAME) == null) {
+            Security.addProvider(new BouncyCastleProvider());
+        }
     }
 
     @Override
@@ -58,7 +64,8 @@ public class CSRModule extends ReactContextBaseJavaModule {
 
     /**
      * Custom ContentSigner implementation for Android Keystore
-     * Android Keystore requires using Signature API directly, not through BouncyCastle
+     * Android Keystore requires using Signature API directly, not through
+     * BouncyCastle
      */
     private static class AndroidKeystoreContentSigner implements ContentSigner {
         private final ByteArrayOutputStream outputStream;
@@ -68,7 +75,7 @@ public class CSRModule extends ReactContextBaseJavaModule {
         public AndroidKeystoreContentSigner(PrivateKey privateKey, String algorithm) throws Exception {
             this.outputStream = new ByteArrayOutputStream();
             this.sigAlgId = new DefaultSignatureAlgorithmIdentifierFinder().find(algorithm);
-            
+
             // Use Android's Signature class, not BouncyCastle
             this.signature = Signature.getInstance(algorithm);
             this.signature.initSign(privateKey);
@@ -103,15 +110,17 @@ public class CSRModule extends ReactContextBaseJavaModule {
             String state = params.hasKey("state") ? params.getString("state") : "Nevada";
             String locality = params.hasKey("locality") ? params.getString("locality") : "Reno";
             String organization = params.hasKey("organization") ? params.getString("organization") : "Generac";
-            String organizationalUnit = params.hasKey("organizationalUnit") ? params.getString("organizationalUnit") : "PWRview";
+            String organizationalUnit = params.hasKey("organizationalUnit") ? params.getString("organizationalUnit")
+                    : "PWRview";
             String commonName = params.hasKey("commonName") ? params.getString("commonName") : "";
             String serialNumber = params.hasKey("serialNumber") ? params.getString("serialNumber") : "";
             String ipAddress = params.hasKey("ipAddress") ? params.getString("ipAddress") : "10.10.10.10";
             String curve = params.hasKey("curve") ? params.getString("curve") : "secp384r1"; // P-384 default
-            
+            String phoneInfo = params.hasKey("phoneInfo") ? params.getString("phoneInfo") : null;
+
             // CRITICAL: privateKeyAlias for Android Keystore
             String privateKeyAlias = params.hasKey("privateKeyAlias") ? params.getString("privateKeyAlias") : null;
-            
+
             if (privateKeyAlias == null || privateKeyAlias.isEmpty()) {
                 promise.reject("MISSING_ALIAS", "privateKeyAlias is required for secure key storage");
                 return;
@@ -141,22 +150,19 @@ public class CSRModule extends ReactContextBaseJavaModule {
 
             // Generate key pair in Android Keystore (hardware-backed)
             KeyPairGenerator keyPairGenerator = KeyPairGenerator.getInstance(
-                KeyProperties.KEY_ALGORITHM_EC, 
-                ANDROID_KEYSTORE
-            );
+                    KeyProperties.KEY_ALGORITHM_EC,
+                    ANDROID_KEYSTORE);
 
             // Configure key generation with hardware backing
             KeyGenParameterSpec.Builder specBuilder = new KeyGenParameterSpec.Builder(
-                privateKeyAlias,
-                KeyProperties.PURPOSE_SIGN | KeyProperties.PURPOSE_VERIFY
-            )
-            .setAlgorithmParameterSpec(new ECGenParameterSpec(keystoreCurve))
-            .setDigests(
-                KeyProperties.DIGEST_SHA256,
-                KeyProperties.DIGEST_SHA384,
-                KeyProperties.DIGEST_SHA512
-            )
-            .setUserAuthenticationRequired(false); // Set to true if you want user auth (fingerprint/PIN)
+                    privateKeyAlias,
+                    KeyProperties.PURPOSE_SIGN | KeyProperties.PURPOSE_VERIFY)
+                    .setAlgorithmParameterSpec(new ECGenParameterSpec(keystoreCurve))
+                    .setDigests(
+                            KeyProperties.DIGEST_SHA256,
+                            KeyProperties.DIGEST_SHA384,
+                            KeyProperties.DIGEST_SHA512)
+                    .setUserAuthenticationRequired(false); // Set to true if you want user auth (fingerprint/PIN)
 
             // Initialize key generator with spec
             keyPairGenerator.initialize(specBuilder.build());
@@ -181,38 +187,55 @@ public class CSRModule extends ReactContextBaseJavaModule {
             X500Name subject = new X500Name(subjectBuilder.toString());
 
             // Create CSR builder
-            PKCS10CertificationRequestBuilder csrBuilder = 
-                new JcaPKCS10CertificationRequestBuilder(subject, publicKey);
+            PKCS10CertificationRequestBuilder csrBuilder = new JcaPKCS10CertificationRequestBuilder(subject, publicKey);
 
             // Create extensions
             ExtensionsGenerator extGen = new ExtensionsGenerator();
 
             // Add Key Usage (critical): Digital Signature, Key Agreement
             KeyUsage keyUsage = new KeyUsage(
-                KeyUsage.digitalSignature | KeyUsage.keyAgreement
-            );
+                    KeyUsage.digitalSignature | KeyUsage.keyAgreement);
             extGen.addExtension(Extension.keyUsage, true, keyUsage);
 
             // Add Extended Key Usage: TLS Web Client Authentication
             ExtendedKeyUsage extendedKeyUsage = new ExtendedKeyUsage(
-                KeyPurposeId.id_kp_clientAuth
-            );
+                    KeyPurposeId.id_kp_clientAuth);
             extGen.addExtension(Extension.extendedKeyUsage, false, extendedKeyUsage);
 
-            // Add Subject Alternative Name: IP Address
-            GeneralName[] sanArray = new GeneralName[1];
-            sanArray[0] = new GeneralName(GeneralName.iPAddress, ipAddress);
+            // Build Subject Alternative Names
+            List<GeneralName> sanList = new ArrayList<>();
+
+            // Add IP Address
+            sanList.add(new GeneralName(GeneralName.iPAddress, ipAddress));
+
+            // Add phone info as URI if provided
+            if (phoneInfo != null && !phoneInfo.trim().isEmpty()) {
+                try {
+                    // Use URI format: phone:value or device:value or just the raw value
+                    // You can customize the prefix as needed
+                    String uriValue = "phone:" + phoneInfo.trim();
+                    sanList.add(new GeneralName(GeneralName.uniformResourceIdentifier, uriValue));
+
+                    Log.d(MODULE_NAME, "Successfully added phoneInfo as URI: " + uriValue);
+                } catch (Exception e) {
+                    Log.e(MODULE_NAME, "Failed to add phone info to SAN", e);
+                    // Continue without phone info rather than failing the entire CSR
+                }
+            }
+
+            // Convert list to array and create GeneralNames
+            GeneralName[] sanArray = sanList.toArray(new GeneralName[0]);
             GeneralNames subjectAltNames = new GeneralNames(sanArray);
             extGen.addExtension(Extension.subjectAlternativeName, false, subjectAltNames);
 
             // Add extensions to CSR
             csrBuilder.addAttribute(
-                PKCSObjectIdentifiers.pkcs_9_at_extensionRequest,
-                extGen.generate()
-            );
+                    PKCSObjectIdentifiers.pkcs_9_at_extensionRequest,
+                    extGen.generate());
 
             // Sign the CSR using Android Keystore
-            // Use custom ContentSigner because Android Keystore doesn't work with BouncyCastle's builder
+            // Use custom ContentSigner because Android Keystore doesn't work with
+            // BouncyCastle's builder
             ContentSigner signer = new AndroidKeystoreContentSigner(privateKey, "SHA256withECDSA");
 
             PKCS10CertificationRequest csr = csrBuilder.build(signer);
@@ -225,8 +248,7 @@ public class CSRModule extends ReactContextBaseJavaModule {
             String csrPem = csrWriter.toString();
 
             // Prepare response - NO PRIVATE KEY RETURNED!
-            com.facebook.react.bridge.WritableMap response = 
-                com.facebook.react.bridge.Arguments.createMap();
+            com.facebook.react.bridge.WritableMap response = com.facebook.react.bridge.Arguments.createMap();
             response.putString("csr", csrPem);
             response.putString("privateKeyAlias", privateKeyAlias); // Return alias only
             response.putString("publicKey", Base64.encodeToString(publicKey.getEncoded(), Base64.NO_WRAP));
@@ -268,7 +290,7 @@ public class CSRModule extends ReactContextBaseJavaModule {
         try {
             KeyStore keyStore = KeyStore.getInstance(ANDROID_KEYSTORE);
             keyStore.load(null);
-            
+
             if (!keyStore.containsAlias(privateKeyAlias)) {
                 promise.reject("KEY_NOT_FOUND", "Key with alias '" + privateKeyAlias + "' not found");
                 return;
@@ -296,15 +318,26 @@ public class CSRModule extends ReactContextBaseJavaModule {
         try {
             KeyStore keyStore = KeyStore.getInstance(ANDROID_KEYSTORE);
             keyStore.load(null);
-            
+
             KeyStore.Entry entry = keyStore.getEntry(privateKeyAlias, null);
             if (entry instanceof KeyStore.PrivateKeyEntry) {
                 KeyStore.PrivateKeyEntry privateKeyEntry = (KeyStore.PrivateKeyEntry) entry;
+
                 // Check if key is hardware-backed (available on Android 9+)
                 if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.P) {
-                    return privateKeyEntry.getPrivateKey()
-                        .getAlgorithm()
-                        .equals(KeyProperties.KEY_ALGORITHM_EC);
+                    try {
+                        KeyFactory factory = KeyFactory.getInstance(
+                                privateKeyEntry.getPrivateKey().getAlgorithm(),
+                                ANDROID_KEYSTORE);
+                        KeyInfo keyInfo = factory.getKeySpec(
+                                privateKeyEntry.getPrivateKey(),
+                                KeyInfo.class);
+                        return keyInfo.isInsideSecureHardware();
+                    } catch (Exception e) {
+                        // Fall back to assuming hardware-backed
+                        Log.w(MODULE_NAME, "Could not determine hardware backing status", e);
+                        return true;
+                    }
                 }
             }
             return true; // Assume hardware-backed for older Android versions
