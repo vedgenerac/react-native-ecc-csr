@@ -5,7 +5,7 @@ module.exports = {
         packageInstance: 'new com.ecccsr.CSRPackage()'
       },
       ios: {
-        project: './ios/EccCsrGenerator.xcodeproj',
+        project: './ios/CSRModule.xcodeproj',
       },
     }
   }

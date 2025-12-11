@@ -1,17 +1,9 @@
-//
-//  EccCsrGenerator.m
-//  react-native-ecc-csr
-//
-//  iOS native implementation for generating ECC Certificate Signing Requests
-//
-
-#import "EccCsrGenerator.h"
+#import "CSRModule.h"
 #import <Security/Security.h>
 #import <CommonCrypto/CommonCrypto.h>
 
-@implementation EccCsrGenerator
+@implementation CSRModule
 
-// Export with same name as your existing Android module
 RCT_EXPORT_MODULE(CSRModule)
 
 // Export the generateCSR method to JavaScript
@@ -30,7 +22,7 @@ RCT_EXPORT_METHOD(generateCSR:(NSDictionary *)params
         NSString *organizationalUnit = params[@"organizationalUnit"] ?: @"";
         NSString *ipAddress = params[@"ipAddress"] ?: @"";
         NSString *curve = params[@"curve"] ?: @"secp384r1";  // Default to secp384r1
-        NSString *phoneInfo = params[@"phoneInfo"];  // ⭐️ Added phoneInfo parameter
+        NSString *phoneInfo = params[@"phoneInfo"]; 
         NSString *privateKeyAlias = params[@"privateKeyAlias"];
         
         // Validate required parameters
@@ -68,7 +60,7 @@ RCT_EXPORT_METHOD(generateCSR:(NSDictionary *)params
             return;
         }
         
-        // Build CSR with phoneInfo parameter ⭐️
+        // Build CSR with phoneInfo parameter
         NSData *csrData = [self buildCSRWithSubject:@{
             @"CN": commonName,
             @"serialNumber": serialNumber,
@@ -82,7 +74,7 @@ RCT_EXPORT_METHOD(generateCSR:(NSDictionary *)params
                                          privateKey:privateKey
                                               curve:normalizedCurve
                                           ipAddress:ipAddress
-                                          phoneInfo:phoneInfo  // ⭐️ Pass phoneInfo
+                                          phoneInfo:phoneInfo 
                                               error:&error];
         
         if (error) {
@@ -106,8 +98,6 @@ RCT_EXPORT_METHOD(generateCSR:(NSDictionary *)params
         reject(@"EXCEPTION", exception.reason, nil);
     }
 }
-
-// Additional methods to match Android API
 
 RCT_EXPORT_METHOD(deleteKey:(NSString *)privateKeyAlias
                   resolver:(RCTPromiseResolveBlock)resolve
@@ -384,7 +374,7 @@ RCT_EXPORT_METHOD(getPublicKey:(NSString *)privateKeyAlias
                      privateKey:(SecKeyRef)privateKey
                           curve:(NSString *)curve
                       ipAddress:(NSString *)ipAddress
-                      phoneInfo:(NSString *)phoneInfo  // ⭐️ Added phoneInfo parameter
+                      phoneInfo:(NSString *)phoneInfo 
                           error:(NSError **)error {
     
     // Build the CSR components
@@ -392,7 +382,7 @@ RCT_EXPORT_METHOD(getPublicKey:(NSString *)privateKeyAlias
     NSData *publicKeyInfo = [self exportPublicKey:publicKey error:error];
     if (*error) return nil;
     
-    NSData *extensions = [self buildExtensions:ipAddress phoneInfo:phoneInfo];  // ⭐️ Pass phoneInfo
+    NSData *extensions = [self buildExtensions:ipAddress phoneInfo:phoneInfo];
     NSData *attributes = [self buildAttributes:extensions];
     
     // Build CertificationRequestInfo
@@ -471,7 +461,6 @@ RCT_EXPORT_METHOD(getPublicKey:(NSString *)privateKeyAlias
     // Get OID for attribute
     NSData *oid = [self getOIDForAttribute:key];
     
-    // ⭐️ CRITICAL FIX: Match Android's encoding exactly
     // Country (C) and serialNumber use PrintableString (0x13)
     // All other fields use UTF8String (0x0C)
     NSData *stringValue;
@@ -508,7 +497,6 @@ RCT_EXPORT_METHOD(getPublicKey:(NSString *)privateKeyAlias
 
 #pragma mark - Extensions
 
-// ⭐️ Updated to accept phoneInfo parameter
 - (NSData *)buildExtensions:(NSString *)ipAddress phoneInfo:(NSString *)phoneInfo {
     NSMutableData *extensions = [NSMutableData data];
     
@@ -536,7 +524,7 @@ RCT_EXPORT_METHOD(getPublicKey:(NSString *)privateKeyAlias
     //   Bit 4: keyAgreement     = 00001000 = 0x08
     //   Combined:                 10001000 = 0x88
     //
-    // ⭐️ CRITICAL: DER BIT STRING format: [unused_bits, data_bytes...]
+    // RITICAL: DER BIT STRING format: [unused_bits, data_bytes...]
     // Since we only use bits 0 and 4 (5 bits total), we have 3 unused bits
     // Android uses: 03 02 03 88 (3 unused bits)
     // We must match this exactly!
@@ -562,7 +550,7 @@ RCT_EXPORT_METHOD(getPublicKey:(NSString *)privateKeyAlias
     return [self buildExtension:@"2.5.29.37" critical:NO value:sequence];
 }
 
-// ⭐️ Updated to handle both IP address and phoneInfo
+
 - (NSData *)buildSubjectAltNameExtension:(NSString *)ipAddress phoneInfo:(NSString *)phoneInfo {
     NSMutableData *sanData = [NSMutableData data];
     
@@ -588,7 +576,6 @@ RCT_EXPORT_METHOD(getPublicKey:(NSString *)privateKeyAlias
         }
     }
     
-    // ⭐️ Add phoneInfo as URI if provided (matching Android implementation)
     if (phoneInfo && phoneInfo.length > 0) {
         @try {
             // Trim whitespace
@@ -667,7 +654,6 @@ RCT_EXPORT_METHOD(getPublicKey:(NSString *)privateKeyAlias
 
 #pragma mark - Signing
 
-// ✅ FIXED: This method was causing the "Signature did not match" error
 // The bug was double-hashing: manually hashing with SHA-256, then using
 // kSecKeyAlgorithmECDSASignatureMessageX962SHA256 which also hashes.
 // Solution: Use kSecKeyAlgorithmECDSASignatureDigestX962SHA256 which expects pre-hashed data.
@@ -805,7 +791,7 @@ RCT_EXPORT_METHOD(getPublicKey:(NSString *)privateKeyAlias
     return data;
 }
 
-// ⭐️ CRITICAL FIX: Match Android's exact encoding
+// Match Android's exact encoding
 // Country (C) and serialNumber use PrintableString (0x13)
 // All other DN fields (ST, L, O, OU, CN) use UTF8String (0x0C)
 - (NSData *)encodePrintableString:(NSString *)string {
